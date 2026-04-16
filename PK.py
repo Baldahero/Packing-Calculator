@@ -375,12 +375,11 @@ with st.form("packing_form"):
         item_type = st.selectbox(
             "Type",
             [
-                "door",
-                "window",
-                "fixed window",
-                "sliding door",
-                "screen",
-                "facade",
+                "Door",
+                "Window",
+                "Fixed window",
+                "Sliding door",
+                "Facade",
             ],
         )
 
