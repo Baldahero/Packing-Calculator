@@ -1,0 +1,503 @@
+import math
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Dict, List, Tuple
+
+import pandas as pd
+import streamlit as st
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+MAX_GLAZED_HEIGHT = 2700
+MAX_PACKING_HEIGHT = 2800
+MAX_PALLET_WEIGHT_KG = 1000.0
+MAX_ITEMS_PER_PALLET = 6
+
+GLASS_BOX_PRICE_EUR = 150.0
+GLASS_BOX_MAX_WEIGHT_KG = 1000.0
+GLASS_PALLET_WIDTH_MM = 1200
+TRUCK_WIDTH_M = 2.0
+
+
+# ============================================================
+# DATA MODEL
+# ============================================================
+@dataclass
+class Construction:
+    item_name: str
+    item_type: str
+    width_mm: float
+    height_mm: float
+    qty: int
+    weight_kg: float
+    glazed: bool
+
+
+# ============================================================
+# PACKING RULES
+# ============================================================
+def min_pallet_width_by_height(height_mm: float) -> int:
+    if height_mm <= 1000:
+        return 400
+    if height_mm <= 2000:
+        return 800
+    if height_mm <= MAX_PACKING_HEIGHT:
+        return 1200
+    return 0
+
+
+def real_pallet_width_mm(width_mm: float, height_mm: float) -> int:
+    # If construction is packed sideways
+    if height_mm > MAX_GLAZED_HEIGHT:
+        return int(height_mm + 200)
+
+    # Normal packing: width + 100, but not less than min width by height
+    normal_width = width_mm + 100
+    min_width = min_pallet_width_by_height(height_mm)
+    return int(max(normal_width, min_width))
+
+
+def price_band_width_mm(size_mm: float) -> int:
+    if size_mm <= 1000:
+        return 1000
+    if size_mm <= 1500:
+        return 1500
+    if size_mm <= 2500:
+        return 2500
+    if size_mm <= 3500:
+        return 3500
+    if size_mm <= 5000:
+        return 5000
+    return int(math.ceil(size_mm / 1000.0) * 1000)
+
+
+def pallet_widths(width_mm: float, height_mm: float) -> Tuple[int, int]:
+    real_width = real_pallet_width_mm(width_mm, height_mm)
+    price_width = price_band_width_mm(real_width)
+    return real_width, price_width
+
+
+def pallet_price_eur(width_mm: float) -> float:
+    w = float(width_mm or 0)
+    if w <= 1000:
+        return 31.0
+    if w <= 1500:
+        return 44.0
+    if w <= 2500:
+        return 60.0
+    if w <= 3500:
+        return 72.0
+    if w <= 5000:
+        return 94.0
+    return 120.0
+
+
+def ldm_from_width(width_mm: float, count: int = 1) -> float:
+    return (float(width_mm) * float(count)) / TRUCK_WIDTH_M / 1000.0
+
+
+def calculate_construction(construction: Construction) -> Dict[str, object]:
+    frame_pallet_min = min_pallet_width_by_height(construction.height_mm)
+    req_pallet_width, price_band_width = pallet_widths(
+        construction.width_mm,
+        construction.height_mm,
+    )
+    packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
+
+    if req_pallet_width > 5000:
+        return {
+            "Item": construction.item_name,
+            "Type": construction.item_type,
+            "Width (mm)": float(construction.width_mm),
+            "Height (mm)": float(construction.height_mm),
+            "Qty": int(construction.qty),
+            "Unit weight (kg)": float(construction.weight_kg),
+            "Input glazed": "YES" if construction.glazed else "NO",
+            "Packed as": "NOT POSSIBLE",
+            "Glass separate": "N/A",
+            "Packed sideways": "N/A",
+            "Req pallet width (mm)": "NOT POSSIBLE",
+            "Price band width (mm)": "NOT POSSIBLE",
+            "Frame pallet min (mm)": frame_pallet_min if frame_pallet_min else "N/A",
+            "Notes": "Construction size exceeds current pallet pricing ranges",
+        }
+
+    packed_as = "UNGLAZED"
+    glass_separate = "NO"
+    notes = "Packed without glass"
+
+    if construction.glazed:
+        if construction.height_mm <= MAX_GLAZED_HEIGHT:
+            packed_as = "GLAZED"
+            notes = "Can be packed with glass"
+        else:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Glass must be packed separately; construction packed sideways"
+
+    if not construction.glazed and packed_sideways:
+        notes = "Construction packed sideways"
+
+    return {
+        "Item": construction.item_name,
+        "Type": construction.item_type,
+        "Width (mm)": float(construction.width_mm),
+        "Height (mm)": float(construction.height_mm),
+        "Qty": int(construction.qty),
+        "Unit weight (kg)": float(construction.weight_kg),
+        "Input glazed": "YES" if construction.glazed else "NO",
+        "Packed as": packed_as,
+        "Glass separate": glass_separate,
+        "Packed sideways": "YES" if packed_sideways else "NO",
+        "Req pallet width (mm)": int(req_pallet_width),
+        "Price band width (mm)": int(price_band_width),
+        "Frame pallet min (mm)": int(frame_pallet_min) if frame_pallet_min else 0,
+        "Notes": notes,
+    }
+
+
+# ============================================================
+# PALLET PACKING
+# ============================================================
+def expand_by_qty(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in df.iterrows():
+        qty = int(row["Qty"])
+        for unit_idx in range(1, qty + 1):
+            rr = row.copy()
+            rr["Qty"] = 1
+            rr["Unit idx"] = unit_idx
+            rows.append(rr)
+    return pd.DataFrame(rows)
+
+
+def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
+    if units.empty:
+        return []
+
+    u = units.copy()
+    u["Unit weight (kg)"] = pd.to_numeric(u["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    u = u.sort_values("Unit weight (kg)", ascending=False).reset_index(drop=True)
+
+    pallets: List[Dict[str, object]] = []
+
+    for _, item in u.iterrows():
+        w = float(item["Unit weight (kg)"])
+        placed = False
+
+        for pallet in pallets:
+            if (
+                pallet["weight_kg"] + w <= MAX_PALLET_WEIGHT_KG
+                and pallet["items_count"] + 1 <= MAX_ITEMS_PER_PALLET
+            ):
+                pallet["weight_kg"] += w
+                pallet["items_count"] += 1
+                pallet["items"].append(item)
+                placed = True
+                break
+
+        if not placed:
+            pallets.append(
+                {
+                    "weight_kg": w,
+                    "items_count": 1,
+                    "items": [item],
+                }
+            )
+
+    return pallets
+
+
+def build_pallet_outputs(results_df: pd.DataFrame):
+    valid_df = results_df[results_df["Packed as"] != "NOT POSSIBLE"].copy()
+    if valid_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0.0, 0.0
+
+    units = expand_by_qty(valid_df)
+    pallets = pack_mixed(units)
+
+    pallet_summary_rows = []
+    plan_rows = []
+    total_pallet_cost = 0.0
+    total_pallet_ldm = 0.0
+
+    for i, pallet in enumerate(pallets, start=1):
+        items_df = pd.DataFrame(pallet["items"])
+
+        pallet_req_width = int(items_df["Req pallet width (mm)"].max())
+        pallet_price_band_width = int(items_df["Price band width (mm)"].max())
+
+        pallet_price = pallet_price_eur(pallet_price_band_width)
+        pallet_ldm = ldm_from_width(pallet_req_width, 1)
+
+        total_pallet_cost += pallet_price
+        total_pallet_ldm += pallet_ldm
+
+        pallet_summary_rows.append(
+            {
+                "Pallet no": i,
+                "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),
+                "Constructions count": int(items_df["Item"].nunique()),
+                "Units count": int(len(items_df)),
+                "Pallet req width (mm)": pallet_req_width,
+                "Price band width (mm)": pallet_price_band_width,
+                "Pallet price (EUR)": pallet_price,
+                "Pallet LDM": round(pallet_ldm, 3),
+            }
+        )
+
+        for _, item in items_df.iterrows():
+            plan_rows.append(
+                {
+                    "Pallet no": i,
+                    "Item": item["Item"],
+                    "Type": item["Type"],
+                    "Width (mm)": item["Width (mm)"],
+                    "Height (mm)": item["Height (mm)"],
+                    "Unit weight (kg)": item["Unit weight (kg)"],
+                    "Packed as": item["Packed as"],
+                    "Glass separate": item["Glass separate"],
+                    "Packed sideways": item["Packed sideways"],
+                    "Req pallet width (mm)": item["Req pallet width (mm)"],
+                    "Price band width (mm)": item["Price band width (mm)"],
+                    "Unit idx": item["Unit idx"],
+                }
+            )
+
+    pallet_summary_df = pd.DataFrame(pallet_summary_rows)
+    plan_df = pd.DataFrame(plan_rows)
+    return pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm
+
+
+# ============================================================
+# GLASS BOXES
+# ============================================================
+def calculate_glass_boxes(results_df: pd.DataFrame):
+    if results_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
+    if separate_glass_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    total_glass_weight = float(
+        (
+            pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
+            * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
+        ).sum()
+    )
+
+    if total_glass_weight <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
+    glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
+    glass_ldm = ldm_from_width(GLASS_PALLET_WIDTH_MM, glass_boxes)
+
+    return glass_boxes, total_glass_weight, glass_cost, glass_ldm
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+def make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        kpi_df.to_excel(writer, sheet_name="Summary", index=False)
+        results_df.to_excel(writer, sheet_name="Constructions", index=False)
+        pallet_summary_df.to_excel(writer, sheet_name="Pallet Summary", index=False)
+        plan_df.to_excel(writer, sheet_name="Packing Plan", index=False)
+    return output.getvalue()
+
+
+# ============================================================
+# SESSION HELPERS
+# ============================================================
+def add_result_to_session(result: Dict[str, object]) -> None:
+    if "results" not in st.session_state:
+        st.session_state.results = []
+    st.session_state.results.append(result)
+
+
+def clear_results() -> None:
+    st.session_state.results = []
+
+
+# ============================================================
+# UI
+# ============================================================
+st.set_page_config(page_title="Packing Calculator", layout="wide")
+
+header_left, header_right = st.columns([1, 4])
+with header_left:
+    try:
+        st.image("nordan_logo.png", use_container_width=True)
+    except Exception:
+        st.markdown("**NorDan**")
+
+with header_right:
+    st.title("Packing Calculator")
+    st.caption("Manual packing calculation for constructions")
+
+with st.expander("Rules used", expanded=True):
+    st.markdown(
+        f"""
+        - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
+        - If height is **more than 2700 mm**, construction is packed **sideways**
+        - Sideways packing width = **height + 200 mm**
+        - Normal packing width = **width + 100 mm**
+        - Minimum pallet width by height:
+            - **<= 1000 mm → 400 mm**
+            - **<= 2000 mm → 800 mm**
+            - **<= 2800 mm → 1200 mm**
+        - Real pallet width = actual width used for **display and LDM**
+        - Price band width = width used only for **price calculation**
+        - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
+        - Max items per pallet = **{MAX_ITEMS_PER_PALLET}**
+        - If glazed height is **more than 2700 mm**, the construction is packed as **unglazed** and glass is counted on **separate glass boxes**
+        - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
+        - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
+        """
+    )
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+
+st.subheader("Add construction")
+
+with st.form("packing_form"):
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        item_name = st.text_input("Item name", value="D1")
+        item_type = st.selectbox(
+            "Type",
+            [
+                "door",
+                "window",
+                "fixed",
+                "sliding",
+                "screen",
+                "panel",
+                "facade",
+                "other",
+            ],
+        )
+
+    with col2:
+        width_mm = st.number_input("Width (mm)", min_value=1.0, value=1200.0, step=1.0)
+        height_mm = st.number_input("Height (mm)", min_value=1.0, value=2600.0, step=1.0)
+
+    with col3:
+        qty = st.number_input("Quantity", min_value=1, value=1, step=1)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=100.0, step=1.0)
+        glazed = st.checkbox("Glazed", value=True)
+
+    submitted = st.form_submit_button("Calculate and add")
+
+    if submitted:
+        construction = Construction(
+            item_name=item_name.strip() or "Unnamed",
+            item_type=item_type,
+            width_mm=float(width_mm),
+            height_mm=float(height_mm),
+            qty=int(qty),
+            weight_kg=float(weight_kg),
+            glazed=glazed,
+        )
+        result = calculate_construction(construction)
+        add_result_to_session(result)
+        st.success(f"Added: {result['Item']}")
+
+st.subheader("Preview")
+
+preview = Construction(
+    item_name=item_name.strip() or "Unnamed",
+    item_type=item_type,
+    width_mm=float(width_mm),
+    height_mm=float(height_mm),
+    qty=int(qty),
+    weight_kg=float(weight_kg),
+    glazed=glazed,
+)
+
+preview_df = pd.DataFrame([calculate_construction(preview)])
+st.dataframe(preview_df, use_container_width=True)
+
+st.divider()
+st.subheader("Constructions")
+
+if st.session_state.results:
+    results_df = pd.DataFrame(st.session_state.results)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("### Remove item")
+    col_del1, col_del2 = st.columns([2, 1])
+
+    with col_del1:
+        item_to_delete = st.selectbox(
+            "Select item to remove",
+            options=list(range(len(results_df))),
+            format_func=lambda x: f"{results_df.iloc[x]['Item']} (row {x})",
+        )
+
+    with col_del2:
+        st.write("")
+        st.write("")
+        if st.button("Delete selected"):
+            st.session_state.results.pop(item_to_delete)
+            st.rerun()
+
+    pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm = build_pallet_outputs(results_df)
+    glass_boxes, total_glass_weight, glass_cost, glass_ldm = calculate_glass_boxes(results_df)
+    total_packaging_cost = total_pallet_cost + glass_cost
+    total_ldm = total_pallet_ldm + glass_ldm
+
+    kpi_df = pd.DataFrame(
+        [
+            {
+                "Product pallets count": int(len(pallet_summary_df)),
+                "Pallet cost (EUR)": round(total_pallet_cost, 2),
+                "Glass boxes count": int(glass_boxes),
+                "Glass weight total (kg)": round(total_glass_weight, 2),
+                "Glass cost (EUR)": round(glass_cost, 2),
+                "Total packaging cost (EUR)": round(total_packaging_cost, 2),
+                "Product LDM": round(total_pallet_ldm, 3),
+                "Glass LDM": round(glass_ldm, 3),
+                "Total LDM": round(total_ldm, 3),
+            }
+        ]
+    )
+
+    st.subheader("Summary")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Product pallets", int(len(pallet_summary_df)))
+    c2.metric("Glass boxes", int(glass_boxes))
+    c3.metric("Packaging cost", f"{total_packaging_cost:.2f} EUR")
+    c4.metric("Total LDM", f"{total_ldm:.3f}")
+
+    st.dataframe(kpi_df, use_container_width=True)
+
+    if not pallet_summary_df.empty:
+        st.subheader("Pallet summary")
+        st.dataframe(pallet_summary_df, use_container_width=True)
+
+    if not plan_df.empty:
+        st.subheader("Packing plan")
+        st.dataframe(plan_df, use_container_width=True)
+
+    excel_data = make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df)
+    st.download_button(
+        label="Download Excel report",
+        data=excel_data,
+        file_name="packing_calculation.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    if st.button("Clear all results"):
+        clear_results()
+        st.rerun()
+else:
+    st.info("No constructions added yet.")
