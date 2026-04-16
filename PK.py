@@ -114,8 +114,6 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
             "Real pallet width (mm)": "N/A",
-            "Req pallet width (mm)": "NOT POSSIBLE",
-            "Frame pallet min (mm)": frame_pallet_min if frame_pallet_min else "N/A",
             "Notes": "Construction size exceeds current pallet pricing ranges",
         }
 
@@ -147,8 +145,6 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
         "Real pallet width (mm)": int(real_width),
-        "Req pallet width (mm)": int(req_pallet_width),
-        "Frame pallet min (mm)": int(frame_pallet_min) if frame_pallet_min else 0,
         "Notes": notes,
     }
 
@@ -234,10 +230,8 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                     axis=1,
                 ).max()
             )
-        # Rounded/pricing width → used for price tier
-        pallet_req_width = int(
-            pd.to_numeric(items_df["Req pallet width (mm)"], errors="coerce").max()
-        )
+        # Rounded/pricing width → computed from real width for price tier lookup
+        pallet_req_width = round_up_pallet_width(pallet_real_width)
 
         pallet_price = pallet_price_eur(pallet_req_width)
         pallet_ldm = ldm_from_width(pallet_real_width, 1)
@@ -252,7 +246,6 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                 "Constructions count": int(items_df["Item"].nunique()),
                 "Units count": int(len(items_df)),
                 "Pallet real width (mm)": round(pallet_real_width, 1),
-                "Pallet req width (mm)": pallet_req_width,
                 "Pallet price (EUR)": pallet_price,
                 "Pallet LDM": round(pallet_ldm, 3),
             }
@@ -271,7 +264,6 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                     "Glass separate": item["Glass separate"],
                     "Packed sideways": item["Packed sideways"],
                     "Real pallet width (mm)": item["Real pallet width (mm)"],
-                    "Req pallet width (mm)": item["Req pallet width (mm)"],
                     "Unit idx": item["Unit idx"],
                 }
             )
@@ -356,10 +348,10 @@ with st.expander("Rules used", expanded=True):
         f"""
         - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
         - If height is **more than 2700 mm**, construction is packed **sideways**
-        - **Real pallet width** (physical):
+        - **Real pallet width** (physical, used for LDM):
             - Normal: **construction width + 100 mm**
             - Sideways: **construction height + 200 mm**
-        - **Req pallet width** (for pricing, rounded to standard tier):
+        - Pallet price tier is based on rounded real width (internal):
             - Normal: **max(construction width, minimum pallet width by height)**
             - Sideways: **rounded(height + 200)**
         - Minimum pallet width by height:
@@ -372,7 +364,7 @@ with st.expander("Rules used", expanded=True):
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
         - **LDM** is calculated using **real pallet width**
-        - **Pallet price** is determined by **req pallet width** (rounded tier)
+        - **Pallet price** is determined by rounded width tier (not shown in tables)
         """
     )
 
