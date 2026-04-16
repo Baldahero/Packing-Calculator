@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -11,11 +11,11 @@ import streamlit as st
 # SETTINGS
 # ============================================================
 MAX_GLAZED_HEIGHT = 2700
-MAX_PACKING_HEIGHT = 2700
+MAX_PACKING_HEIGHT = 2800
 MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 
-GLASS_BOX_PRICE_EUR = 180.0
+GLASS_BOX_PRICE_EUR = 150.0
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
@@ -48,18 +48,7 @@ def min_pallet_width_by_height(height_mm: float) -> int:
     return 0
 
 
-def real_pallet_width_mm(width_mm: float, height_mm: float) -> int:
-    # If construction is packed sideways
-    if height_mm > MAX_GLAZED_HEIGHT:
-        return int(height_mm + 200)
-
-    # Normal packing: width + 100, but not less than min width by height
-    normal_width = width_mm + 100
-    min_width = min_pallet_width_by_height(height_mm)
-    return int(max(normal_width, min_width))
-
-
-def price_band_width_mm(size_mm: float) -> int:
+def round_up_pallet_width(size_mm: float) -> int:
     if size_mm <= 1000:
         return 1000
     if size_mm <= 1500:
@@ -73,10 +62,13 @@ def price_band_width_mm(size_mm: float) -> int:
     return int(math.ceil(size_mm / 1000.0) * 1000)
 
 
-def pallet_widths(width_mm: float, height_mm: float) -> Tuple[int, int]:
-    real_width = real_pallet_width_mm(width_mm, height_mm)
-    price_width = price_band_width_mm(real_width)
-    return real_width, price_width
+def pallet_width_for_pricing(width_mm: float, height_mm: float) -> int:
+    # If construction is higher than 2700 mm, it is packed sideways.
+    # Then packing width is based on height + 200 mm.
+    if height_mm > MAX_GLAZED_HEIGHT:
+        return round_up_pallet_width(height_mm + 200)
+
+    return int(max(width_mm, min_pallet_width_by_height(height_mm)))
 
 
 def pallet_price_eur(width_mm: float) -> float:
@@ -100,13 +92,10 @@ def ldm_from_width(width_mm: float, count: int = 1) -> float:
 
 def calculate_construction(construction: Construction) -> Dict[str, object]:
     frame_pallet_min = min_pallet_width_by_height(construction.height_mm)
-    req_pallet_width, price_band_width = pallet_widths(
-        construction.width_mm,
-        construction.height_mm,
-    )
+    req_pallet_width = pallet_width_for_pricing(construction.width_mm, construction.height_mm)
     packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
 
-    if req_pallet_width > 5000:
+    if construction.height_mm > 5000:
         return {
             "Item": construction.item_name,
             "Type": construction.item_type,
@@ -119,7 +108,6 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
             "Req pallet width (mm)": "NOT POSSIBLE",
-            "Price band width (mm)": "NOT POSSIBLE",
             "Frame pallet min (mm)": frame_pallet_min if frame_pallet_min else "N/A",
             "Notes": "Construction size exceeds current pallet pricing ranges",
         }
@@ -152,7 +140,6 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
         "Req pallet width (mm)": int(req_pallet_width),
-        "Price band width (mm)": int(price_band_width),
         "Frame pallet min (mm)": int(frame_pallet_min) if frame_pallet_min else 0,
         "Notes": notes,
     }
@@ -225,11 +212,8 @@ def build_pallet_outputs(results_df: pd.DataFrame):
 
     for i, pallet in enumerate(pallets, start=1):
         items_df = pd.DataFrame(pallet["items"])
-
         pallet_req_width = int(items_df["Req pallet width (mm)"].max())
-        pallet_price_band_width = int(items_df["Price band width (mm)"].max())
-
-        pallet_price = pallet_price_eur(pallet_price_band_width)
+        pallet_price = pallet_price_eur(pallet_req_width)
         pallet_ldm = ldm_from_width(pallet_req_width, 1)
 
         total_pallet_cost += pallet_price
@@ -242,7 +226,6 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                 "Constructions count": int(items_df["Item"].nunique()),
                 "Units count": int(len(items_df)),
                 "Pallet req width (mm)": pallet_req_width,
-                "Price band width (mm)": pallet_price_band_width,
                 "Pallet price (EUR)": pallet_price,
                 "Pallet LDM": round(pallet_ldm, 3),
             }
@@ -261,7 +244,6 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                     "Glass separate": item["Glass separate"],
                     "Packed sideways": item["Packed sideways"],
                     "Req pallet width (mm)": item["Req pallet width (mm)"],
-                    "Price band width (mm)": item["Price band width (mm)"],
                     "Unit idx": item["Unit idx"],
                 }
             )
@@ -328,7 +310,7 @@ def clear_results() -> None:
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="Packing Calculator Pre-Alpha", layout="wide")
+st.set_page_config(page_title="Packing Calculator", layout="wide")
 
 header_left, header_right = st.columns([1, 4])
 with header_left:
@@ -338,7 +320,7 @@ with header_left:
         st.markdown("**NorDan**")
 
 with header_right:
-    st.title("Packing Calculator Pre-Alpha")
+    st.title("Packing Calculator")
     st.caption("Manual packing calculation for constructions")
 
 with st.expander("Rules used", expanded=True):
@@ -346,14 +328,14 @@ with st.expander("Rules used", expanded=True):
         f"""
         - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
         - If height is **more than 2700 mm**, construction is packed **sideways**
-        - Sideways packing width = **height + 200 mm**
-        - Normal packing width = **width + 100 mm**
+        - Sideways packing size = **height + 200 mm**
         - Minimum pallet width by height:
             - **<= 1000 mm → 400 mm**
             - **<= 2000 mm → 800 mm**
             - **<= 2800 mm → 1200 mm**
-        - Real pallet width = actual width used for **display and LDM**
-        - Price band width = width used only for **price calculation**
+        - Required pallet width for pricing:
+            - normal = **max(construction width, minimum pallet width by height)**
+            - sideways = **rounded(height + 200)**
         - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
         - Max items per pallet = **{MAX_ITEMS_PER_PALLET}**
         - If glazed height is **more than 2700 mm**, the construction is packed as **unglazed** and glass is counted on **separate glass boxes**
@@ -365,63 +347,65 @@ with st.expander("Rules used", expanded=True):
 if "results" not in st.session_state:
     st.session_state.results = []
 
-st.subheader("Add construction")
+left, right = st.columns([1, 1])
 
-with st.form("packing_form"):
-    col1, col2, col3 = st.columns(3)
+with left:
+    st.subheader("Add construction")
 
-    with col1:
-        item_name = st.text_input("Item name", value="...")
+    with st.form("packing_form"):
+        item_name = st.text_input("Item name", value="D1")
+
         item_type = st.selectbox(
             "Type",
             [
-                "Door",
-                "Window",
-                "Fixed window",
-                "Sliding door",
-                "Facade",
+                "door",
+                "window",
+                "fixed",
+                "sliding",
+                "screen",
+                "panel",
+                "facade",
+                "other",
             ],
         )
 
-    with col2:
         width_mm = st.number_input("Width (mm)", min_value=1.0, value=1200.0, step=1.0)
         height_mm = st.number_input("Height (mm)", min_value=1.0, value=2600.0, step=1.0)
-
-    with col3:
         qty = st.number_input("Quantity", min_value=1, value=1, step=1)
         weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=100.0, step=1.0)
         glazed = st.checkbox("Glazed", value=True)
 
-    submitted = st.form_submit_button("Calculate and add")
+        submitted = st.form_submit_button("Calculate and add")
 
-    if submitted:
-        construction = Construction(
-            item_name=item_name.strip() or "Unnamed",
-            item_type=item_type,
-            width_mm=float(width_mm),
-            height_mm=float(height_mm),
-            qty=int(qty),
-            weight_kg=float(weight_kg),
-            glazed=glazed,
-        )
-        result = calculate_construction(construction)
-        add_result_to_session(result)
-        st.success(f"Added: {result['Item']}")
+        if submitted:
+            construction = Construction(
+                item_name=item_name.strip() or "Unnamed",
+                item_type=item_type,
+                width_mm=float(width_mm),
+                height_mm=float(height_mm),
+                qty=int(qty),
+                weight_kg=float(weight_kg),
+                glazed=glazed,
+            )
+            result = calculate_construction(construction)
+            add_result_to_session(result)
+            st.success(f"Added: {result['Item']}")
 
-st.subheader("Preview")
+with right:
+    st.subheader("Preview")
 
-preview = Construction(
-    item_name=item_name.strip() or "Unnamed",
-    item_type=item_type,
-    width_mm=float(width_mm),
-    height_mm=float(height_mm),
-    qty=int(qty),
-    weight_kg=float(weight_kg),
-    glazed=glazed,
-)
+    preview = Construction(
+        item_name=item_name.strip() or "Unnamed",
+        item_type=item_type,
+        width_mm=float(width_mm),
+        height_mm=float(height_mm),
+        qty=int(qty),
+        weight_kg=float(weight_kg),
+        glazed=glazed,
+    )
 
-preview_df = pd.DataFrame([calculate_construction(preview)])
-st.dataframe(preview_df, use_container_width=True)
+    preview_df = pd.DataFrame([calculate_construction(preview)])
+    st.dataframe(preview_df, use_container_width=True)
 
 st.divider()
 st.subheader("Constructions")
