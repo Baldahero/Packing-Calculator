@@ -222,9 +222,18 @@ def build_pallet_outputs(results_df: pd.DataFrame):
         items_df = pd.DataFrame(pallet["items"])
 
         # Real physical width → used for LDM
-        pallet_real_width = float(
-            pd.to_numeric(items_df["Real pallet width (mm)"], errors="coerce").max()
-        )
+        # Fallback: if column missing (old session data), compute from width+100 or height+200
+        if "Real pallet width (mm)" in items_df.columns:
+            pallet_real_width = float(
+                pd.to_numeric(items_df["Real pallet width (mm)"], errors="coerce").max()
+            )
+        else:
+            pallet_real_width = float(
+                items_df.apply(
+                    lambda r: real_pallet_width(float(r["Width (mm)"]), float(r["Height (mm)"])),
+                    axis=1,
+                ).max()
+            )
         # Rounded/pricing width → used for price tier
         pallet_req_width = int(
             pd.to_numeric(items_df["Req pallet width (mm)"], errors="coerce").max()
