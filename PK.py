@@ -11,11 +11,11 @@ import streamlit as st
 # SETTINGS
 # ============================================================
 MAX_GLAZED_HEIGHT = 2700
-MAX_PACKING_HEIGHT = 2800
+MAX_PACKING_HEIGHT = 2700
 MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 
-GLASS_BOX_PRICE_EUR = 150.0
+GLASS_BOX_PRICE_EUR = 180.0
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
@@ -371,18 +371,16 @@ with st.form("packing_form"):
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        item_name = st.text_input("Item name", value="D1")
+        item_name = st.text_input("Item name", value="...")
         item_type = st.selectbox(
             "Type",
             [
                 "door",
                 "window",
-                "fixed",
-                "sliding",
+                "fixed window",
+                "sliding door",
                 "screen",
-                "panel",
                 "facade",
-                "other",
             ],
         )
 
