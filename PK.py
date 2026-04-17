@@ -364,7 +364,7 @@ st.set_page_config(page_title="Packing Calculator", layout="wide")
 header_left, header_right = st.columns([1, 4])
 with header_left:
     try:
-        st.image("nordan_logo.png", use_container_width=True)
+        st.image("nordan_logo1.png", use_container_width=True)
     except Exception:
         st.markdown("**NorDan**")
 
