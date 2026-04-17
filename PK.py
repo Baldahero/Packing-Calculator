@@ -43,6 +43,7 @@ class Construction:
     qty: int
     weight_kg: float
     glazed: bool
+    glass_weight_kg: float = 0.0
 
 
 # ============================================================
@@ -111,6 +112,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Height (mm)": float(construction.height_mm),
             "Qty": int(construction.qty),
             "Unit weight (kg)": float(construction.weight_kg),
+            "Glass weight (kg)": float(construction.glass_weight_kg),
             "Input glazed": "YES" if construction.glazed else "NO",
             "Packed as": "NOT POSSIBLE",
             "Glass separate": "N/A",
@@ -151,6 +153,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Height (mm)": float(construction.height_mm),
         "Qty": int(construction.qty),
         "Unit weight (kg)": float(construction.weight_kg),
+        "Glass weight (kg)": float(construction.glass_weight_kg) if construction.glazed else 0.0,
         "Input glazed": "YES" if construction.glazed else "NO",
         "Packed as": packed_as,
         "Glass separate": glass_separate,
@@ -307,7 +310,7 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
 
     total_glass_weight = float(
         (
-            pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
+            pd.to_numeric(separate_glass_df["Glass weight (kg)"], errors="coerce").fillna(0.0)
             * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
         ).sum()
     )
@@ -389,6 +392,7 @@ with st.expander("Rules used", expanded=True):
         - **Door + Sidelight / Window + Sidelight**: enter as separate items, standard rules apply
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
+        - **Glass weight** is entered manually per construction (used for glass box calculation when glass is packed separately)
         - **LDM** is calculated using **pallet width**
         - **Pallet price** is determined by rounded width tier (not shown in tables)
         """
@@ -426,6 +430,14 @@ with left:
         qty = st.number_input("Quantity", min_value=1, value=1, step=1)
         weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=0.0, step=1.0)
         glazed = st.checkbox("Glazed", value=True)
+        glass_weight_kg = st.number_input(
+            "Glass weight (kg)",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            help="Weight of glass only (used for glass box calculation when glass is packed separately)",
+            disabled=not glazed,
+        )
 
         submitted = st.form_submit_button("Calculate and add")
 
@@ -441,6 +453,7 @@ with left:
                     qty=int(qty),
                     weight_kg=float(weight_kg),
                     glazed=glazed,
+                    glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
                 )
                 result = calculate_construction(construction)
                 add_result_to_session(result)
@@ -457,6 +470,7 @@ with right:
         qty=int(qty),
         weight_kg=float(weight_kg),
         glazed=glazed,
+        glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
     )
 
     preview_df = pd.DataFrame([calculate_construction(preview)])
