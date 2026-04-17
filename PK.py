@@ -14,11 +14,21 @@ MAX_GLAZED_HEIGHT = 2700
 MAX_PACKING_HEIGHT = 2700
 MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
+MAX_ITEMS_PER_PALLET_HEAVY = 4  # for sliding/folding types
 
 GLASS_BOX_PRICE_EUR = 180.0
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
+
+# Types with special glazing rule: glazed only if height <= 2700 AND weight <= 1000 kg
+# Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
+HEAVY_GLAZING_TYPES = {
+    "double sliding door",
+    "triple sliding door",
+    "2-leaf+2fixed sliding unit",
+    "folding door",
+}
 
 
 # ============================================================
@@ -96,10 +106,9 @@ def ldm_from_width(width_mm: float, count: int = 1) -> float:
 
 
 def calculate_construction(construction: Construction) -> Dict[str, object]:
-    frame_pallet_min = min_pallet_width_by_height(construction.height_mm)
-    req_pallet_width = pallet_width_for_pricing(construction.width_mm, construction.height_mm)
     real_width = real_pallet_width(construction.width_mm, construction.height_mm)
     packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
+    is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
 
     if construction.height_mm > 5000:
         return {
@@ -113,6 +122,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Packed as": "NOT POSSIBLE",
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
+            "Max per pallet": "N/A",
             "Real pallet width (mm)": "N/A",
             "Notes": "Construction size exceeds current pallet pricing ranges",
         }
@@ -122,16 +132,24 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     notes = "Packed without glass"
 
     if construction.glazed:
-        if construction.height_mm <= MAX_GLAZED_HEIGHT:
-            packed_as = "GLAZED"
-            notes = "Can be packed with glass"
-        else:
+        if packed_sideways:
+            # height > 2700: always unglazed, glass in separate box
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = "Glass must be packed separately; construction packed sideways"
+        elif is_heavy_type and construction.weight_kg > MAX_PALLET_WEIGHT_KG:
+            # heavy type + weight > 1000 kg: unglazed, no glass box (just too heavy)
+            packed_as = "UNGLAZED"
+            glass_separate = "NO"
+            notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass"
+        else:
+            packed_as = "GLAZED"
+            notes = "Can be packed with glass"
 
     if not construction.glazed and packed_sideways:
         notes = "Construction packed sideways"
+
+    max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
 
     return {
         "Item": construction.item_name,
@@ -144,6 +162,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Packed as": packed_as,
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
+        "Max per pallet": int(max_per_pallet),
         "Real pallet width (mm)": int(real_width),
         "Notes": notes,
     }
@@ -176,15 +195,24 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
 
     for _, item in u.iterrows():
         w = float(item["Unit weight (kg)"])
+        # Use per-item max_per_pallet if available, else global default
+        try:
+            item_max = int(item["Max per pallet"])
+        except (KeyError, ValueError, TypeError):
+            item_max = MAX_ITEMS_PER_PALLET
         placed = False
 
         for pallet in pallets:
+            # The effective limit for this pallet is the minimum of all items already on it
+            # plus the new item's limit — we use the most restrictive
+            pallet_max = min(pallet["max_per_pallet"], item_max)
             if (
                 pallet["weight_kg"] + w <= MAX_PALLET_WEIGHT_KG
-                and pallet["items_count"] + 1 <= MAX_ITEMS_PER_PALLET
+                and pallet["items_count"] + 1 <= pallet_max
             ):
                 pallet["weight_kg"] += w
                 pallet["items_count"] += 1
+                pallet["max_per_pallet"] = pallet_max
                 pallet["items"].append(item)
                 placed = True
                 break
@@ -194,6 +222,7 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
                 {
                     "weight_kg": w,
                     "items_count": 1,
+                    "max_per_pallet": item_max,
                     "items": [item],
                 }
             )
@@ -340,7 +369,7 @@ with header_left:
         st.markdown("**NorDan**")
 
 with header_right:
-    st.title("Packing Calculator Pre-Alfa version")
+    st.title("Packing Calculator")
     st.caption("Manual packing calculation for constructions")
 
 with st.expander("Rules used", expanded=True):
@@ -359,8 +388,11 @@ with st.expander("Rules used", expanded=True):
             - **<= 2000 mm → 800 mm**
             - **<= 2800 mm → 1200 mm**
         - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
-        - Max items per pallet = **{MAX_ITEMS_PER_PALLET}**
+        - Max items per pallet (standard) = **{MAX_ITEMS_PER_PALLET}**
+        - Max items per pallet for **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door** = **{MAX_ITEMS_PER_PALLET_HEAVY}**
+        - **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door**: glazed only if height ≤ 2700 mm **AND** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg; otherwise packed **unglazed** (no glass box)
         - If glazed height is **more than 2700 mm**, the construction is packed as **unglazed** and glass is counted on **separate glass boxes**
+        - **Door + sidelight / Window + sidelight**: enter as separate items, standard rules apply
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
         - **LDM** is calculated using **real pallet width**
@@ -377,16 +409,25 @@ with left:
     st.subheader("Add construction")
 
     with st.form("packing_form"):
-        item_name = st.text_input("Item name", value="...")
+        item_name = st.text_input("Item name", value="D1")
 
         item_type = st.selectbox(
             "Type",
             [
-                "Door",
-                "Window",
-                "Fixed window",
-                "Sliding door",
+                "door",
+                "window",
+                "fixed",
+                "sliding",
+                "double sliding door",
+                "triple sliding door",
+                "2-leaf+2fixed sliding unit",
+                "folding door",
+                "door + sidelight",
+                "window + sidelight",
+                "screen",
+                "panel",
                 "facade",
+                "other",
             ],
         )
 
