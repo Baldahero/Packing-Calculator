@@ -476,6 +476,53 @@ with left:
                 st.success(f"Added: {result['Item']}")
 
 with right:
+    # ---- Order statistics ----
+    if st.session_state.results:
+        st.subheader("Order statistics")
+        stats_df = pd.DataFrame(st.session_state.results)
+
+        total_units = int(pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0).sum())
+        total_weight = float(
+            (pd.to_numeric(stats_df["Unit weight (kg)"], errors="coerce").fillna(0)
+             * pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0)).sum()
+        )
+        glazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "GLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        unglazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "UNGLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        glass_separate_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Glass separate"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        sideways_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed sideways"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        _psdf, _, _, _ = build_pallet_outputs(stats_df)
+        est_pallets = int(len(_psdf))
+
+        s1, s2 = st.columns(2)
+        s1.metric("Total units", total_units)
+        s2.metric("Total weight", f"{total_weight:,.0f} kg")
+
+        s3, s4 = st.columns(2)
+        s3.metric("Glazed units", glazed_units)
+        s4.metric("Unglazed units", unglazed_units)
+
+        s5, s6 = st.columns(2)
+        s5.metric("Glass separate", glass_separate_units)
+        s6.metric("Packed sideways", sideways_units)
+
+        st.metric("Estimated pallets", est_pallets)
+
+        if sideways_units > 0:
+            st.warning(f"⚠️ {sideways_units} unit(s) will be packed sideways (height > 2700 mm)")
+        if glass_separate_units > 0:
+            st.info(f"ℹ️ {glass_separate_units} unit(s) require separate glass boxes")
+
+        st.divider()
+
+    # ---- Preview ----
     st.subheader("Preview")
 
     preview = Construction(
@@ -512,7 +559,8 @@ with right:
         import os
         if os.path.exists(img_file):
             st.image(img_file, caption=item_type, use_container_width=True)
-
+        else:
+            st.caption(f"📷 Add `{img_file}` next to PK.py to show image for **{item_type}**")
 
 st.divider()
 st.subheader("Constructions")
