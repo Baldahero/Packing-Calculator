@@ -421,7 +421,6 @@ with left:
                 "Door",
                 "Window",
                 "Fixed Window",
-                "Sliding Door",
                 "Double Sliding Door",
                 "Triple Sliding Door",
                 "2-leaf+2-fixed Sliding Door",
