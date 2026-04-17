@@ -26,7 +26,7 @@ TRUCK_WIDTH_M = 2.0
 HEAVY_GLAZING_TYPES = {
     "double sliding door",
     "triple sliding door",
-    "2-leaf+2fixed sliding unit",
+    "2-leaf+2-fixed sliding unit",
     "folding door",
 }
 
@@ -386,7 +386,7 @@ with st.expander("Rules used", expanded=True):
         - Minimum pallet width by height:
             - **<= 1000 mm → 400 mm**
             - **<= 2000 mm → 800 mm**
-            - **<= 2800 mm → 1200 mm**
+            - **<= 2700 mm → 1200 mm**
         - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
         - Max items per pallet (standard) = **{MAX_ITEMS_PER_PALLET}**
         - Max items per pallet for **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door** = **{MAX_ITEMS_PER_PALLET_HEAVY}**
@@ -414,20 +414,17 @@ with left:
         item_type = st.selectbox(
             "Type",
             [
-                "door",
-                "window",
-                "fixed",
-                "sliding",
-                "double sliding door",
-                "triple sliding door",
-                "2-leaf+2fixed sliding unit",
-                "folding door",
-                "door + sidelight",
-                "window + sidelight",
-                "screen",
-                "panel",
+                "Door",
+                "Window",
+                "Fixed Window",
+                "Sliding Door",
+                "Double Sliding Door",
+                "Triple Sliding Door",
+                "2-leaf+2-fixed Sliding Door",
+                "Folding Door",
+                "Door + Sidelight",
+                "Window + Sidelight",
                 "facade",
-                "other",
             ],
         )
 
