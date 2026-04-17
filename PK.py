@@ -539,29 +539,6 @@ with right:
     preview_df = pd.DataFrame([calculate_construction(preview)])
     st.dataframe(preview_df, use_container_width=True)
 
-    # Type image — filename maps to selected type
-    # Just add a PNG file with the same name next to PK.py to make it appear
-    TYPE_IMAGES = {
-        "Door":                      "img_door.png",
-        "Window":                    "img_window.png",
-        "Fixed Window":              "img_fixed_window.png",
-        "Double Sliding Door":       "img_double_sliding_door.png",
-        "Triple Sliding Door":       "img_triple_sliding_door.png",
-        "2-leaf+2-fixed Sliding Door": "img_2leaf_2fixed.png",
-        "Folding Door":              "img_folding_door.png",
-        "Door + Sidelight":          "img_door_sidelight.png",
-        "Window + Sidelight":        "img_window_sidelight.png",
-        "Facade":                    "img_facade.png",
-    }
-
-    img_file = TYPE_IMAGES.get(item_type)
-    if img_file:
-        import os
-        if os.path.exists(img_file):
-            st.image(img_file, caption=item_type, use_container_width=True)
-        else:
-            st.caption(f"📷 Add `{img_file}` next to PK.py to show image for **{item_type}**")
-
 st.divider()
 st.subheader("Constructions")
 
