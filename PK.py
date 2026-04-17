@@ -413,7 +413,7 @@ with left:
     st.subheader("Add construction")
 
     with st.form("packing_form"):
-        item_name = st.text_input("Item name", value="D1")
+        item_name = st.text_input("Item name", value="...")
 
         item_type = st.selectbox(
             "Type",
