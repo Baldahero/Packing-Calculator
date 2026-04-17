@@ -424,7 +424,7 @@ with left:
                 "Folding Door",
                 "Door + Sidelight",
                 "Window + Sidelight",
-                "facade",
+                "Facade",
             ],
         )
 
