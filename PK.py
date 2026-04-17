@@ -396,7 +396,6 @@ with st.expander("Rules used", expanded=True):
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
         - **LDM** is calculated using **real pallet width**
-        - **Pallet price** is determined by rounded width tier (not shown in tables)
         """
     )
 
