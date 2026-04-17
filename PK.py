@@ -460,21 +460,67 @@ with left:
                 st.success(f"Added: {result['Item']}")
 
 with right:
-    st.subheader("Preview")
+    st.subheader("Order statistics")
 
-    preview = Construction(
-        item_name=item_name.strip() or "Unnamed",
-        item_type=item_type,
-        width_mm=float(width_mm),
-        height_mm=float(height_mm),
-        qty=int(qty),
-        weight_kg=float(weight_kg),
-        glazed=glazed,
-        glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
-    )
+    if st.session_state.results:
+        stats_df = pd.DataFrame(st.session_state.results)
 
-    preview_df = pd.DataFrame([calculate_construction(preview)])
-    st.dataframe(preview_df, use_container_width=True)
+        total_units = int(pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0).sum())
+        total_weight = float(
+            (pd.to_numeric(stats_df["Unit weight (kg)"], errors="coerce").fillna(0)
+             * pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0)).sum()
+        )
+        glazed_units = int(
+            pd.to_numeric(
+                stats_df.loc[stats_df["Packed as"] == "GLAZED", "Qty"],
+                errors="coerce"
+            ).fillna(0).sum()
+        )
+        unglazed_units = int(
+            pd.to_numeric(
+                stats_df.loc[stats_df["Packed as"] == "UNGLAZED", "Qty"],
+                errors="coerce"
+            ).fillna(0).sum()
+        )
+        glass_separate_units = int(
+            pd.to_numeric(
+                stats_df.loc[stats_df["Glass separate"] == "YES", "Qty"],
+                errors="coerce"
+            ).fillna(0).sum()
+        )
+        sideways_units = int(
+            pd.to_numeric(
+                stats_df.loc[stats_df["Packed sideways"] == "YES", "Qty"],
+                errors="coerce"
+            ).fillna(0).sum()
+        )
+
+        # estimate pallets from current results
+        _psdf, _, _, _ = build_pallet_outputs(stats_df)
+        est_pallets = int(len(_psdf))
+
+        s1, s2 = st.columns(2)
+        s1.metric("Total units", total_units)
+        s2.metric("Total weight", f"{total_weight:,.0f} kg")
+
+        s3, s4 = st.columns(2)
+        s3.metric("Glazed units", glazed_units)
+        s4.metric("Unglazed units", unglazed_units)
+
+        s5, s6 = st.columns(2)
+        s5.metric("Glass separate", glass_separate_units)
+        s6.metric("Packed sideways", sideways_units)
+
+        st.metric("Estimated pallets", est_pallets)
+
+        # warn if any sideways or glass separate
+        if sideways_units > 0:
+            st.warning(f"⚠️ {sideways_units} unit(s) will be packed sideways (height > 2700 mm)")
+        if glass_separate_units > 0:
+            st.info(f"ℹ️ {glass_separate_units} unit(s) require separate glass boxes")
+
+    else:
+        st.info("Add constructions to see order statistics.")
 
 st.divider()
 st.subheader("Constructions")
