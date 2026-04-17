@@ -21,7 +21,7 @@ GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
 
-# Types with special glazing rule: glazed only if height <= 2700 AND weight <= 1000 kg
+# Types with special glazing rule: glazed only if height <= 2700 and weight <= 1000 kg
 # Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
 HEAVY_GLAZING_TYPES = {
     "double sliding door",
