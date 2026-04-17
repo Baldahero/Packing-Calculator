@@ -363,7 +363,7 @@ def clear_results() -> None:
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="Packing Calculator Pre-Alfa Version", layout="wide")
+st.set_page_config(page_title="Packing Calculator", layout="wide")
 
 header_left, header_right = st.columns([1, 4])
 with header_left:
@@ -373,7 +373,7 @@ with header_left:
         st.markdown("**NorDan**")
 
 with header_right:
-    st.title("Packing Calculator")
+    st.title("Packing Calculator Pre-Alfa Version")
     st.caption("Manual packing calculation for constructions")
 
 with st.expander("Rules used", expanded=True):
