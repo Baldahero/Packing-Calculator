@@ -390,7 +390,7 @@ with st.expander("Rules used", expanded=True):
         - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
         - Max items per pallet (standard) = **{MAX_ITEMS_PER_PALLET}**
         - Max items per pallet for **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door** = **{MAX_ITEMS_PER_PALLET_HEAVY}**
-        - **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door**: glazed only if height ≤ 2700 mm **AND** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg; otherwise packed **unglazed** (no glass box)
+        - **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door**: glazed only if height ≤ 2700 mm **and** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg; otherwise packed **unglazed** (no glass box)
         - If glazed height is **more than 2700 mm**, the construction is packed as **unglazed** and glass is counted on **separate glass boxes**
         - **Door + sidelight / Window + sidelight**: enter as separate items, standard rules apply
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
