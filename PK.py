@@ -435,7 +435,7 @@ with left:
         width_mm = st.number_input("Width (mm)", min_value=1.0, value=1200.0, step=1.0)
         height_mm = st.number_input("Height (mm)", min_value=1.0, value=2600.0, step=1.0)
         qty = st.number_input("Quantity", min_value=1, value=1, step=1)
-        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=100.0, step=1.0)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=0.0, step=1.0)
         glazed = st.checkbox("Glazed", value=True)
 
         submitted = st.form_submit_button("Calculate and add")
