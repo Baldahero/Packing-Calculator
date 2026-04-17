@@ -512,8 +512,7 @@ with right:
         import os
         if os.path.exists(img_file):
             st.image(img_file, caption=item_type, use_container_width=True)
-        else:
-            st.caption(f"📷 Add `{img_file}` next to PK.py to show image for **{item_type}**")
+
 
 st.divider()
 st.subheader("Constructions")
