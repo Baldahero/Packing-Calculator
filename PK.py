@@ -324,9 +324,14 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     if separate_glass_df.empty:
         return 0, 0.0, 0.0, 0.0
 
+    # Use glass weight if provided, fallback to unit weight if glass weight is 0
+    glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+    unit_w = pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    effective_glass_w = glass_w.where(glass_w > 0, unit_w)
+
     total_glass_weight = float(
         (
-            pd.to_numeric(separate_glass_df["Glass weight (kg)"], errors="coerce").fillna(0.0)
+            effective_glass_w
             * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
         ).sum()
     )
@@ -460,6 +465,8 @@ with left:
         if submitted:
             if weight_kg <= 0:
                 st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
+            elif glazed and glass_weight_kg <= 0:
+                st.warning("⚠️ Glass weight is 0 — please enter the glass weight before adding.")
             else:
                 construction = Construction(
                     item_name=item_name.strip() or "Unnamed",
