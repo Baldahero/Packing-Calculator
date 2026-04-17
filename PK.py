@@ -26,7 +26,7 @@ TRUCK_WIDTH_M = 2.0
 HEAVY_GLAZING_TYPES = {
     "double sliding door",
     "triple sliding door",
-    "2-leaf+2-fixed sliding unit",
+    "2-leaf+2-fixed sliding door",
     "folding door",
 }
 
@@ -123,7 +123,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
             "Max per pallet": "N/A",
-            "Pallet width (mm)": "N/A",
+            "Real pallet width (mm)": "N/A",
             "Notes": "Construction size exceeds current pallet pricing ranges",
         }
 
@@ -163,7 +163,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
         "Max per pallet": int(max_per_pallet),
-        "Pallet width (mm)": int(real_width),
+        "Real pallet width (mm)": int(real_width),
         "Notes": notes,
     }
 
@@ -230,6 +230,24 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
     return pallets
 
 
+def _get_pallet_width(item) -> float:
+    """Get pallet width from item, handling different column name versions."""
+    for col in ("Pallet width (mm)", "Real pallet width (mm)"):
+        try:
+            v = item[col]
+            f = float(v)
+            if not math.isnan(f):
+                return f
+        except (KeyError, ValueError, TypeError):
+            pass
+    # Final fallback: compute from dimensions
+    try:
+        return real_pallet_width(float(item["Width (mm)"]), float(item["Height (mm)"]))
+    except Exception:
+        return 1200.0
+
+
+
 def build_pallet_outputs(results_df: pd.DataFrame):
     valid_df = results_df[results_df["Packed as"] != "NOT POSSIBLE"].copy()
     if valid_df.empty:
@@ -246,22 +264,8 @@ def build_pallet_outputs(results_df: pd.DataFrame):
     for i, pallet in enumerate(pallets, start=1):
         items_df = pd.DataFrame(pallet["items"])
 
-        # Real physical width → used for LDM
-        # Fallback: if column missing (old session data), compute from width+100 or height+200
-        if "Pallet width (mm)" in items_df.columns:
-            pallet_real_width = float(
-                pd.to_numeric(items_df["Pallet width (mm)"], errors="coerce").max()
-            )
-        else:
-            pallet_real_width = float(
-                items_df.apply(
-                    lambda r: real_pallet_width(float(r["Width (mm)"]), float(r["Height (mm)"])),
-                    axis=1,
-                ).max()
-            )
-        # Rounded/pricing width → computed from real width for price tier lookup
+        pallet_real_width = float(items_df.apply(_get_pallet_width, axis=1).max())
         pallet_req_width = round_up_pallet_width(pallet_real_width)
-
         pallet_price = pallet_price_eur(pallet_req_width)
         pallet_ldm = ldm_from_width(pallet_real_width, 1)
 
@@ -274,7 +278,7 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                 "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),
                 "Constructions count": int(items_df["Item"].nunique()),
                 "Units count": int(len(items_df)),
-                "Pallet real width (mm)": round(pallet_real_width, 1),
+                "Pallet width (mm)": round(pallet_real_width, 1),
                 "Pallet price (EUR)": pallet_price,
                 "Pallet LDM": round(pallet_ldm, 3),
             }
@@ -292,7 +296,7 @@ def build_pallet_outputs(results_df: pd.DataFrame):
                     "Packed as": item["Packed as"],
                     "Glass separate": item["Glass separate"],
                     "Packed sideways": item["Packed sideways"],
-                    "Pallet width (mm)": item["Pallet width (mm)"],
+                    "Pallet width (mm)": _get_pallet_width(item),
                     "Unit idx": item["Unit idx"],
                 }
             )
@@ -364,12 +368,12 @@ st.set_page_config(page_title="Packing Calculator", layout="wide")
 header_left, header_right = st.columns([1, 4])
 with header_left:
     try:
-        st.image("nordan_logo1.png", use_container_width=True)
+        st.image("nordan_logo.png", use_container_width=True)
     except Exception:
         st.markdown("**NorDan**")
 
 with header_right:
-    st.title("Packing Calculator Pre-Alfa Version")
+    st.title("Packing Calculator")
     st.caption("Manual packing calculation for constructions")
 
 with st.expander("Rules used", expanded=True):
@@ -377,7 +381,7 @@ with st.expander("Rules used", expanded=True):
         f"""
         - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
         - If height is **more than 2700 mm**, construction is packed **sideways**
-        - **Pallet width** (physical, used for LDM):
+        - **Real pallet width** (physical, used for LDM):
             - Normal: **construction width + 100 mm**
             - Sideways: **construction height + 200 mm**
         - Pallet price tier is based on rounded real width (internal):
@@ -386,16 +390,17 @@ with st.expander("Rules used", expanded=True):
         - Minimum pallet width by height:
             - **<= 1000 mm → 400 mm**
             - **<= 2000 mm → 800 mm**
-            - **<= 2700 mm → 1200 mm**
+            - **<= 2800 mm → 1200 mm**
         - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
         - Max items per pallet (standard) = **{MAX_ITEMS_PER_PALLET}**
         - Max items per pallet for **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door** = **{MAX_ITEMS_PER_PALLET_HEAVY}**
-        - **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door**: glazed only if height ≤ 2700 mm **and** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg; otherwise packed **unglazed** (no glass box)
+        - **Double Sliding, Triple Sliding, 2-leaf+2fixed, Folding door**: glazed only if height ≤ 2700 mm **AND** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg; otherwise packed **unglazed** (no glass box)
         - If glazed height is **more than 2700 mm**, the construction is packed as **unglazed** and glass is counted on **separate glass boxes**
         - **Door + sidelight / Window + sidelight**: enter as separate items, standard rules apply
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
-        - **LDM** is calculated using **Pallet width**
+        - **LDM** is calculated using **real pallet width**
+        - **Pallet price** is determined by rounded width tier (not shown in tables)
         """
     )
 
@@ -408,7 +413,7 @@ with left:
     st.subheader("Add construction")
 
     with st.form("packing_form"):
-        item_name = st.text_input("Item name", value="...")
+        item_name = st.text_input("Item name", value="D1")
 
         item_type = st.selectbox(
             "Type",
