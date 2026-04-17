@@ -363,7 +363,7 @@ def clear_results() -> None:
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="Packing Calculator", layout="wide")
+st.set_page_config(page_title="Packing Calculator Pre-Alfa Version", layout="wide")
 
 header_left, header_right = st.columns([1, 4])
 with header_left:
