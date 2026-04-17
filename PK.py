@@ -30,6 +30,16 @@ HEAVY_GLAZING_TYPES = {
     "folding door",
 }
 
+# Facades: glass always packed separately regardless of height/weight
+FACADE_TYPES = {
+    "facade",
+}
+
+# Types where glass is ALWAYS packed separately regardless of height/weight
+FACADE_TYPES = {
+    "facade",
+}
+
 
 # ============================================================
 # DATA MODEL
@@ -103,6 +113,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     real_width = real_pallet_width(construction.width_mm, construction.height_mm)
     packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
+    is_facade = construction.item_type.lower() in FACADE_TYPES
 
     if construction.height_mm > 5000:
         return {
@@ -127,7 +138,12 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     notes = "Packed without glass"
 
     if construction.glazed:
-        if packed_sideways:
+        if is_facade:
+            # facade: always unglazed, glass always in separate box
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Facade — glass always packed separately"
+        elif packed_sideways:
             # height > 2700: always unglazed, glass in separate box
             packed_as = "UNGLAZED"
             glass_separate = "YES"
@@ -389,7 +405,7 @@ with st.expander("Rules used", expanded=True):
             - Glazed if height ≤ 2700 mm **and** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg
             - If weight > {MAX_PALLET_WEIGHT_KG:.0f} kg → packed **unglazed**, glass goes to **separate glass box**
         - If height > 2700 mm → packed **sideways**, glass goes to **separate glass box**
-        - **Door + Sidelight / Window + Sidelight**: enter as separate items, standard rules apply
+        - **Facade**: glass is **always** packed separately (regardless of height or weight)
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
         - **Glass weight** is entered manually per construction (used for glass box calculation when glass is packed separately)
@@ -495,7 +511,6 @@ with right:
             ).fillna(0).sum()
         )
 
-        # estimate pallets from current results
         _psdf, _, _, _ = build_pallet_outputs(stats_df)
         est_pallets = int(len(_psdf))
 
@@ -513,7 +528,6 @@ with right:
 
         st.metric("Estimated pallets", est_pallets)
 
-        # warn if any sideways or glass separate
         if sideways_units > 0:
             st.warning(f"⚠️ {sideways_units} unit(s) will be packed sideways (height > 2700 mm)")
         if glass_separate_units > 0:
@@ -521,6 +535,23 @@ with right:
 
     else:
         st.info("Add constructions to see order statistics.")
+
+    st.divider()
+    st.subheader("Preview")
+
+    preview = Construction(
+        item_name=item_name.strip() or "Unnamed",
+        item_type=item_type,
+        width_mm=float(width_mm),
+        height_mm=float(height_mm),
+        qty=int(qty),
+        weight_kg=float(weight_kg),
+        glazed=glazed,
+        glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
+    )
+
+    preview_df = pd.DataFrame([calculate_construction(preview)])
+    st.dataframe(preview_df, use_container_width=True)
 
 st.divider()
 st.subheader("Constructions")
