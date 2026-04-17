@@ -367,7 +367,7 @@ with header_right:
     st.title("Packing Calculator Pre-Alfa Version")
     st.caption("Manual packing calculation for constructions")
 
-with st.expander("Rules used", expanded=True):
+with st.expander("Rules", expanded=True):
     st.markdown(
         f"""
         - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
