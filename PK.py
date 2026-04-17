@@ -430,18 +430,21 @@ with left:
         submitted = st.form_submit_button("Calculate and add")
 
         if submitted:
-            construction = Construction(
-                item_name=item_name.strip() or "Unnamed",
-                item_type=item_type,
-                width_mm=float(width_mm),
-                height_mm=float(height_mm),
-                qty=int(qty),
-                weight_kg=float(weight_kg),
-                glazed=glazed,
-            )
-            result = calculate_construction(construction)
-            add_result_to_session(result)
-            st.success(f"Added: {result['Item']}")
+            if weight_kg <= 0:
+                st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
+            else:
+                construction = Construction(
+                    item_name=item_name.strip() or "Unnamed",
+                    item_type=item_type,
+                    width_mm=float(width_mm),
+                    height_mm=float(height_mm),
+                    qty=int(qty),
+                    weight_kg=float(weight_kg),
+                    glazed=glazed,
+                )
+                result = calculate_construction(construction)
+                add_result_to_session(result)
+                st.success(f"Added: {result['Item']}")
 
 with right:
     st.subheader("Preview")
