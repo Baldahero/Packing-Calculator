@@ -12,6 +12,7 @@ import streamlit as st
 # ============================================================
 MAX_GLAZED_HEIGHT = 2700
 MAX_PACKING_HEIGHT = 2700
+MAX_CONSTRUCTION_HEIGHT = 6600  # absolute max pallet size
 MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
@@ -35,10 +36,6 @@ FACADE_TYPES = {
     "facade",
 }
 
-# Types where glass is ALWAYS packed separately regardless of height/weight
-FACADE_TYPES = {
-    "facade",
-}
 
 
 # ============================================================
@@ -80,13 +77,17 @@ def round_up_pallet_width(size_mm: float) -> int:
         return 3500
     if size_mm <= 5000:
         return 5000
+    if size_mm <= 6000:
+        return 6000
+    if size_mm <= 6600:
+        return 6600
     return int(math.ceil(size_mm / 1000.0) * 1000)
 
 
 def real_pallet_width(width_mm: float, height_mm: float) -> float:
-    """Physical pallet width: height+200 if packed sideways, else width+100."""
+    """Physical pallet width: height if packed sideways, else width+100."""
     if height_mm > MAX_GLAZED_HEIGHT:
-        return height_mm + 200
+        return height_mm
     return width_mm + 100
 
 
@@ -102,6 +103,10 @@ def pallet_price_eur(width_mm: float) -> float:
         return 72.0
     if w <= 5000:
         return 94.0
+    if w <= 6000:
+        return 120.0
+    if w <= 6600:
+        return 120.0
     return 120.0
 
 
@@ -115,7 +120,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
     is_facade = construction.item_type.lower() in FACADE_TYPES
 
-    if construction.height_mm > 5000:
+    if construction.height_mm > MAX_CONSTRUCTION_HEIGHT:
         return {
             "Item": construction.item_name,
             "Type": construction.item_type,
@@ -395,7 +400,7 @@ with st.expander("Rules used", expanded=True):
         - If height is **more than 2700 mm**, construction is packed **sideways**
         - **Pallet width** (physical, used for LDM):
             - Normal: **construction width + 100 mm**
-            - Sideways: **construction height + 200 mm**
+            - Sideways: **construction height** (no extra margin, max 6600 mm)
         - Pallet price tier is based on rounded pallet width (internal):
             - Normal: **max(construction width, minimum pallet width by height)**
             - Sideways: **rounded(height + 200)**
@@ -410,6 +415,7 @@ with st.expander("Rules used", expanded=True):
             - Glazed if height ≤ 2700 mm **and** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg
             - If weight > {MAX_PALLET_WEIGHT_KG:.0f} kg → packed **unglazed**, glass goes to **separate glass box**
         - If height > 2700 mm → packed **sideways**, glass goes to **separate glass box**
+        - Max construction height = **{MAX_CONSTRUCTION_HEIGHT} mm** (above this → NOT POSSIBLE)
         - **Facade**: glass is **always** packed separately (regardless of height or weight)
         - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
         - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
