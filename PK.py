@@ -49,7 +49,7 @@ class Construction:
     height_mm: float
     qty: int
     weight_kg: float
-    glazed: bool
+    glass_mode: str = "Glazed"  # "Glazed" | "Unglazed" | "Without glass"
     glass_weight_kg: float = 0.0
 
 
@@ -119,6 +119,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
     is_facade = construction.item_type.lower() in FACADE_TYPES
+    mode = construction.glass_mode  # "Glazed" | "Unglazed" | "Without glass"
 
     if construction.height_mm > MAX_CONSTRUCTION_HEIGHT:
         return {
@@ -129,7 +130,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Qty": int(construction.qty),
             "Unit weight (kg)": float(construction.weight_kg),
             "Glass weight (kg)": float(construction.glass_weight_kg),
-            "Input glazed": "YES" if construction.glazed else "NO",
+            "Glass mode": mode,
             "Packed as": "NOT POSSIBLE",
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
@@ -142,19 +143,31 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     glass_separate = "NO"
     notes = "Packed without glass"
 
-    if construction.glazed:
+    if mode == "Without glass":
+        # glass is not ours — no glass box, just pack the frame
+        packed_as = "UNGLAZED"
+        glass_separate = "NO"
+        notes = "Without glass — frame only"
+
+    elif mode == "Unglazed":
+        # glass travels separately → glass box needed
+        packed_as = "UNGLAZED"
+        glass_separate = "YES"
+        notes = "Glass packed separately"
+        if packed_sideways:
+            notes = "Glass packed separately; construction packed sideways"
+
+    elif mode == "Glazed":
+        # glass travels with frame — check if any rule forces separation
         if is_facade:
-            # facade: always unglazed, glass always in separate box
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = "Facade — glass always packed separately"
         elif packed_sideways:
-            # height > 2700: always unglazed, glass in separate box
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = "Glass must be packed separately; construction packed sideways"
         elif is_heavy_type and construction.weight_kg > MAX_PALLET_WEIGHT_KG:
-            # heavy type + weight > 1000 kg: too heavy to pack glazed → glass in separate box
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass; glass packed separately"
@@ -162,10 +175,13 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "GLAZED"
             notes = "Can be packed with glass"
 
-    if not construction.glazed and packed_sideways:
-        notes = "Construction packed sideways"
+    if mode != "Glazed" and packed_sideways and glass_separate == "NO":
+        notes += "; construction packed sideways"
 
     max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
+
+    # glass weight only relevant when glass is separate
+    stored_glass_weight = float(construction.glass_weight_kg) if glass_separate == "YES" else 0.0
 
     return {
         "Item": construction.item_name,
@@ -174,8 +190,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Height (mm)": float(construction.height_mm),
         "Qty": int(construction.qty),
         "Unit weight (kg)": float(construction.weight_kg),
-        "Glass weight (kg)": float(construction.glass_weight_kg) if construction.glazed else 0.0,
-        "Input glazed": "YES" if construction.glazed else "NO",
+        "Glass weight (kg)": stored_glass_weight,
+        "Glass mode": mode,
         "Packed as": packed_as,
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
@@ -211,7 +227,7 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
     # Total weight on pallet = frame + glass if glass is packed together, else frame only
     u["_total_weight"] = u.apply(
         lambda r: r["Unit weight (kg)"] + r["Glass weight (kg)"]
-        if r.get("Glass separate", "NO") == "NO" and r.get("Input glazed", "NO") == "YES"
+        if r.get("Glass separate", "NO") == "NO" and r.get("Glass mode", "Without glass") == "Glazed"
         else r["Unit weight (kg)"],
         axis=1,
     )
@@ -467,14 +483,21 @@ with left:
         width_mm = st.number_input("Width (mm)", min_value=1.0, value=1000.0, step=1.0)
         height_mm = st.number_input("Height (mm)", min_value=1.0, value=1000.0, step=1.0)
         qty = st.number_input("Quantity", min_value=1, value=1, step=1)
-        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=0.0, step=1.0)
-        glazed = st.checkbox("Glazed", value=True)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=0.0, step=0.01)
+
+        glass_mode = st.selectbox(
+            "Glass",
+            ["Glazed", "Unglazed", "Without glass"],
+            help="Glazed = glass travels with frame | Unglazed = glass goes separately (glass box) | Without glass = no glass at all",
+        )
+
         glass_weight_kg = st.number_input(
             "Glass weight (kg)",
             min_value=0.0,
             value=0.0,
             step=0.01,
-            help="Weight of glass only (used for glass box calculation when glass is packed separately)",
+            disabled=(glass_mode != "Unglazed"),
+            help="Weight of glass only — required when glass is packed separately",
         )
 
         submitted = st.form_submit_button("Calculate and add")
@@ -482,7 +505,7 @@ with left:
         if submitted:
             if weight_kg <= 0:
                 st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
-            elif glazed and glass_weight_kg <= 0:
+            elif glass_mode == "Unglazed" and glass_weight_kg <= 0:
                 st.warning("⚠️ Glass weight is 0 — please enter the glass weight before adding.")
             else:
                 construction = Construction(
@@ -492,8 +515,8 @@ with left:
                     height_mm=float(height_mm),
                     qty=int(qty),
                     weight_kg=float(weight_kg),
-                    glazed=glazed,
-                    glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
+                    glass_mode=glass_mode,
+                    glass_weight_kg=float(glass_weight_kg) if glass_mode == "Unglazed" else 0.0,
                 )
                 result = calculate_construction(construction)
                 add_result_to_session(result)
@@ -556,8 +579,8 @@ with right:
         height_mm=float(height_mm),
         qty=int(qty),
         weight_kg=float(weight_kg),
-        glazed=glazed,
-        glass_weight_kg=float(glass_weight_kg) if glazed else 0.0,
+        glass_mode=glass_mode,
+        glass_weight_kg=float(glass_weight_kg) if glass_mode == "Unglazed" else 0.0,
     )
 
     preview_df = pd.DataFrame([calculate_construction(preview)])
