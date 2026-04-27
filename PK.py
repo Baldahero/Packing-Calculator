@@ -473,9 +473,8 @@ with left:
             "Glass weight (kg)",
             min_value=0.0,
             value=0.0,
-            step=1.0,
+            step=0.01,
             help="Weight of glass only (used for glass box calculation when glass is packed separately)",
-            disabled=not glazed,
         )
 
         submitted = st.form_submit_button("Calculate and add")
