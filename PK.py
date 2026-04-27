@@ -672,15 +672,101 @@ if st.session_state.results:
         st.dataframe(plan_df, use_container_width=True)
 
     excel_data = make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df)
-    st.download_button(
-        label="Download Excel report",
-        data=excel_data,
-        file_name="packing_calculation.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
 
-    if st.button("Clear all results"):
-        clear_results()
-        st.rerun()
+    dl_col, clear_col = st.columns([3, 1])
+    with dl_col:
+        file_name_input = st.text_input(
+            "File name", value="packing_calculation",
+            placeholder="Enter file name (without .xlsx)",
+            label_visibility="collapsed",
+        )
+        st.download_button(
+            label="⬇️ Download Excel report",
+            data=excel_data,
+            file_name=f"{file_name_input.strip() or 'packing_calculation'}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with clear_col:
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Clear all", use_container_width=True):
+            clear_results()
+            st.session_state.edit_idx = None
+            st.rerun()
+
 else:
     st.info("No constructions added yet.")
+
+st.divider()
+st.subheader("📂 Import from Excel")
+st.caption("Upload a previously saved packing_calculation.xlsx to continue editing")
+
+uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], label_visibility="collapsed")
+
+if uploaded is not None:
+    try:
+        xl = pd.read_excel(uploaded, sheet_name="Constructions")
+        required_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+                         "Unit weight (kg)", "Glass weight (kg)", "Glass mode",
+                         "Packed as", "Glass separate", "Packed sideways",
+                         "Max per pallet", "Pallet width (mm)", "Notes"}
+        missing = required_cols - set(xl.columns)
+        if missing:
+            st.error(f"❌ Missing columns in file: {missing}")
+        else:
+            st.success(f"✅ Found {len(xl)} construction(s) — ready to import")
+            st.dataframe(xl[["Item", "Type", "Width (mm)", "Height (mm)",
+                              "Qty", "Unit weight (kg)", "Glass weight (kg)", "Glass mode"]],
+                         use_container_width=True)
+
+            imp_col1, imp_col2 = st.columns([1, 3])
+            with imp_col1:
+                if st.button("⬆️ Import and replace all", use_container_width=True):
+                    imported = []
+                    for _, row in xl.iterrows():
+                        imported.append({
+                            "Item":              str(row.get("Item", "Unnamed")),
+                            "Type":              str(row.get("Type", "Door")),
+                            "Width (mm)":        float(row.get("Width (mm)", 1000)),
+                            "Height (mm)":       float(row.get("Height (mm)", 1000)),
+                            "Qty":               int(row.get("Qty", 1)),
+                            "Unit weight (kg)":  float(row.get("Unit weight (kg)", 0)),
+                            "Glass weight (kg)": float(row.get("Glass weight (kg)", 0)),
+                            "Glass mode":        str(row.get("Glass mode", "Glazed")),
+                            "Packed as":         str(row.get("Packed as", "UNGLAZED")),
+                            "Glass separate":    str(row.get("Glass separate", "NO")),
+                            "Packed sideways":   str(row.get("Packed sideways", "NO")),
+                            "Max per pallet":    int(row.get("Max per pallet", 6)),
+                            "Pallet width (mm)": float(row.get("Pallet width (mm)", 1000)),
+                            "Notes":             str(row.get("Notes", "")),
+                        })
+                    st.session_state.results = imported
+                    st.session_state.edit_idx = None
+                    st.success(f"Imported {len(imported)} construction(s)!")
+                    st.rerun()
+            with imp_col2:
+                if st.button("➕ Import and add to existing", use_container_width=True):
+                    if "results" not in st.session_state:
+                        st.session_state.results = []
+                    for _, row in xl.iterrows():
+                        st.session_state.results.append({
+                            "Item":              str(row.get("Item", "Unnamed")),
+                            "Type":              str(row.get("Type", "Door")),
+                            "Width (mm)":        float(row.get("Width (mm)", 1000)),
+                            "Height (mm)":       float(row.get("Height (mm)", 1000)),
+                            "Qty":               int(row.get("Qty", 1)),
+                            "Unit weight (kg)":  float(row.get("Unit weight (kg)", 0)),
+                            "Glass weight (kg)": float(row.get("Glass weight (kg)", 0)),
+                            "Glass mode":        str(row.get("Glass mode", "Glazed")),
+                            "Packed as":         str(row.get("Packed as", "UNGLAZED")),
+                            "Glass separate":    str(row.get("Glass separate", "NO")),
+                            "Packed sideways":   str(row.get("Packed sideways", "NO")),
+                            "Max per pallet":    int(row.get("Max per pallet", 6)),
+                            "Pallet width (mm)": float(row.get("Pallet width (mm)", 1000)),
+                            "Notes":             str(row.get("Notes", "")),
+                        })
+                    st.success(f"Added {len(xl)} construction(s) to existing list!")
+                    st.rerun()
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
