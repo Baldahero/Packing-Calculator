@@ -206,12 +206,22 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
 
     u = units.copy()
     u["Unit weight (kg)"] = pd.to_numeric(u["Unit weight (kg)"], errors="coerce").fillna(0.0)
-    u = u.sort_values("Unit weight (kg)", ascending=False).reset_index(drop=True)
+    u["Glass weight (kg)"] = pd.to_numeric(u.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+
+    # Total weight on pallet = frame + glass if glass is packed together, else frame only
+    u["_total_weight"] = u.apply(
+        lambda r: r["Unit weight (kg)"] + r["Glass weight (kg)"]
+        if r.get("Glass separate", "NO") == "NO" and r.get("Input glazed", "NO") == "YES"
+        else r["Unit weight (kg)"],
+        axis=1,
+    )
+
+    u = u.sort_values("_total_weight", ascending=False).reset_index(drop=True)
 
     pallets: List[Dict[str, object]] = []
 
     for _, item in u.iterrows():
-        w = float(item["Unit weight (kg)"])
+        w = float(item["_total_weight"])
         try:
             item_max = int(item["Max per pallet"])
         except (KeyError, ValueError, TypeError):
@@ -240,6 +250,8 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
                     "items": [item],
                 }
             )
+
+    return pallets
 
     return pallets
 
@@ -287,7 +299,7 @@ def build_pallet_outputs(results_df: pd.DataFrame):
         pallet_summary_rows.append(
             {
                 "Pallet no": i,
-                "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),
+                "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),  # frame + glass if glazed together
                 "Constructions count": int(items_df["Item"].nunique()),
                 "Units count": int(len(items_df)),
                 "Pallet width (mm)": round(pallet_real_width, 1),
