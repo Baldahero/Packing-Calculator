@@ -455,52 +455,64 @@ with st.expander("Rules used", expanded=True):
 
 if "results" not in st.session_state:
     st.session_state.results = []
+if "edit_idx" not in st.session_state:
+    st.session_state.edit_idx = None  # index of item being edited
 
 left, right = st.columns([1, 1])
 
+TYPES = [
+    "Door", "Window", "Fixed Window",
+    "Double Sliding Door", "Triple Sliding Door",
+    "2-leaf+2-fixed Sliding Door", "Folding Door",
+    "Door + Sidelight", "Window + Sidelight", "Facade",
+]
+
 with left:
-    st.subheader("Add construction")
+    # Prefill values from edit state if editing
+    _e = st.session_state.edit_idx
+    if _e is not None:
+        _r = st.session_state.results[_e]
+        _def_name     = _r.get("Item", "...")
+        _def_type     = _r.get("Type", TYPES[0])
+        _def_width    = float(_r.get("Width (mm)", 1000.0))
+        _def_height   = float(_r.get("Height (mm)", 1000.0))
+        _def_qty      = int(_r.get("Qty", 1))
+        _def_weight   = float(_r.get("Unit weight (kg)", 0.0))
+        _def_mode     = _r.get("Glass mode", "Glazed")
+        _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0))
+        _title = f"✏️ Edit construction: {_def_name}"
+    else:
+        _def_name, _def_type, _def_width, _def_height = "...", TYPES[0], 1000.0, 1000.0
+        _def_qty, _def_weight, _def_mode, _def_glass_w = 1, 0.0, "Glazed", 0.0
+        _title = "Add construction"
+
+    st.subheader(_title)
 
     with st.form("packing_form"):
-        item_name = st.text_input("Item name", value="...")
+        item_name = st.text_input("Item name", value=_def_name)
 
-        item_type = st.selectbox(
-            "Type",
-            [
-                "Door",
-                "Window",
-                "Fixed Window",
-                "Double Sliding Door",
-                "Triple Sliding Door",
-                "2-leaf+2-fixed Sliding Door",
-                "Folding Door",
-                "Door + Sidelight",
-                "Window + Sidelight",
-                "Facade",
-            ],
-        )
+        item_type = st.selectbox("Type", TYPES,
+            index=TYPES.index(_def_type) if _def_type in TYPES else 0)
 
-        width_mm = st.number_input("Width (mm)", min_value=1.0, value=1000.0, step=1.0)
-        height_mm = st.number_input("Height (mm)", min_value=1.0, value=1000.0, step=1.0)
-        qty = st.number_input("Quantity", min_value=1, value=1, step=1)
-        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=0.0, step=0.01)
+        width_mm  = st.number_input("Width (mm)",  min_value=1.0,  value=_def_width,  step=1.0)
+        height_mm = st.number_input("Height (mm)", min_value=1.0,  value=_def_height, step=1.0)
+        qty       = st.number_input("Quantity",    min_value=1,    value=_def_qty,    step=1)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=_def_weight, step=0.01)
 
-        glass_mode = st.selectbox(
-            "Glass",
-            ["Glazed", "Unglazed", "Without glass"],
+        glass_mode = st.selectbox("Glass", ["Glazed", "Unglazed", "Without glass"],
+            index=["Glazed", "Unglazed", "Without glass"].index(_def_mode) if _def_mode in ["Glazed", "Unglazed", "Without glass"] else 0,
             help="Glazed = glass travels with frame | Unglazed = glass goes separately (glass box) | Without glass = no glass at all",
         )
 
         glass_weight_kg = st.number_input(
             "Glass weight (kg)",
-            min_value=0.0,
-            value=0.0,
-            step=0.01,
+            min_value=0.0, value=_def_glass_w, step=0.01,
             disabled=(glass_mode != "Unglazed"),
             help="Weight of glass only — required when glass is packed separately",
         )
 
-        submitted = st.form_submit_button("Calculate and add")
+        _btn_label = "Save changes" if _e is not None else "Calculate and add"
+        submitted = st.form_submit_button(_btn_label)
 
         if submitted:
             if weight_kg <= 0:
@@ -519,8 +531,14 @@ with left:
                     glass_weight_kg=float(glass_weight_kg) if glass_mode == "Unglazed" else 0.0,
                 )
                 result = calculate_construction(construction)
-                add_result_to_session(result)
-                st.success(f"Added: {result['Item']}")
+                if _e is not None:
+                    st.session_state.results[_e] = result
+                    st.session_state.edit_idx = None
+                    st.success(f"Updated: {result['Item']}")
+                else:
+                    add_result_to_session(result)
+                    st.success(f"Added: {result['Item']}")
+                st.rerun()
 
 with right:
     # ---- Order statistics ----
@@ -593,21 +611,30 @@ if st.session_state.results:
     results_df = pd.DataFrame(st.session_state.results)
     st.dataframe(results_df, use_container_width=True)
 
-    st.markdown("### Remove item")
-    col_del1, col_del2 = st.columns([2, 1])
+    st.markdown("### Edit / Remove item")
+    col_sel, col_edit, col_del = st.columns([3, 1, 1])
 
-    with col_del1:
-        item_to_delete = st.selectbox(
-            "Select item to remove",
+    with col_sel:
+        item_to_manage = st.selectbox(
+            "Select item",
             options=list(range(len(results_df))),
             format_func=lambda x: f"{results_df.iloc[x]['Item']} (row {x})",
         )
 
-    with col_del2:
+    with col_edit:
         st.write("")
         st.write("")
-        if st.button("Delete selected"):
-            st.session_state.results.pop(item_to_delete)
+        if st.button("✏️ Edit"):
+            st.session_state.edit_idx = item_to_manage
+            st.rerun()
+
+    with col_del:
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Delete"):
+            if st.session_state.edit_idx == item_to_manage:
+                st.session_state.edit_idx = None
+            st.session_state.results.pop(item_to_manage)
             st.rerun()
 
     pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm = build_pallet_outputs(results_df)
