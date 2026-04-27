@@ -507,7 +507,6 @@ with left:
         glass_weight_kg = st.number_input(
             "Glass weight (kg)",
             min_value=0.0, value=_def_glass_w, step=0.01,
-            disabled=(glass_mode != "Unglazed"),
             help="Weight of glass only — required when glass is packed separately",
         )
 
@@ -612,7 +611,7 @@ if st.session_state.results:
     st.dataframe(results_df, use_container_width=True)
 
     st.markdown("### Edit / Remove item")
-    col_sel, col_edit, col_del = st.columns([3, 1, 1])
+    col_sel, col_edit, col_del = st.columns([4, 1, 1])
 
     with col_sel:
         item_to_manage = st.selectbox(
@@ -623,13 +622,11 @@ if st.session_state.results:
 
     with col_edit:
         st.write("")
-        st.write("")
         if st.button("✏️ Edit"):
             st.session_state.edit_idx = item_to_manage
             st.rerun()
 
     with col_del:
-        st.write("")
         st.write("")
         if st.button("🗑️ Delete"):
             if st.session_state.edit_idx == item_to_manage:
