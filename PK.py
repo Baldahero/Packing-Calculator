@@ -611,24 +611,23 @@ if st.session_state.results:
     st.dataframe(results_df, use_container_width=True)
 
     st.markdown("### Edit / Remove item")
-    col_sel, col_edit, col_del = st.columns([4, 1, 1])
+    col_sel, col_edit, col_del = st.columns([6, 1, 1])
 
     with col_sel:
         item_to_manage = st.selectbox(
             "Select item",
             options=list(range(len(results_df))),
             format_func=lambda x: f"{results_df.iloc[x]['Item']} (row {x})",
+            label_visibility="collapsed",
         )
 
     with col_edit:
-        st.write("")
-        if st.button("✏️ Edit"):
+        if st.button("✏️ Edit", use_container_width=True):
             st.session_state.edit_idx = item_to_manage
             st.rerun()
 
     with col_del:
-        st.write("")
-        if st.button("🗑️ Delete"):
+        if st.button("🗑️ Delete", use_container_width=True):
             if st.session_state.edit_idx == item_to_manage:
                 st.session_state.edit_idx = None
             st.session_state.results.pop(item_to_manage)
