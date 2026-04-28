@@ -180,8 +180,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
 
     max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
 
-    # glass weight only relevant when glass is separate
-    stored_glass_weight = float(construction.glass_weight_kg) if glass_separate == "YES" else 0.0
+    # Always store glass weight for visibility; it's used for pallet weight when glazed together
+    stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
 
     return {
         "Item": construction.item_name,
@@ -269,6 +269,7 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
 
     return pallets
 
+    return pallets
 
 
 def _get_pallet_width(item) -> float:
