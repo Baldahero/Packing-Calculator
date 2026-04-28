@@ -269,7 +269,6 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
 
     return pallets
 
-    return pallets
 
 
 def _get_pallet_width(item) -> float:
