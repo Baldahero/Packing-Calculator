@@ -455,8 +455,10 @@ with st.expander("Rules used", expanded=True):
 
 if "results" not in st.session_state:
     st.session_state.results = []
+if "project_name" not in st.session_state:
+    st.session_state.project_name = "packing_calculation"
 if "edit_idx" not in st.session_state:
-    st.session_state.edit_idx = None  # index of item being edited
+    st.session_state.edit_idx = None
 
 left, right = st.columns([1, 1])
 
@@ -675,19 +677,29 @@ if st.session_state.results:
 
     dl_col, clear_col = st.columns([3, 1])
     with dl_col:
-        file_name_input = st.text_input(
-            "File name", value="packing_calculation",
-            placeholder="Enter file name (without .xlsx)",
-            label_visibility="collapsed",
-        )
+        name_c1, name_c2 = st.columns([4, 1])
+        with name_c1:
+            new_name = st.text_input(
+                "Project name",
+                value=st.session_state.project_name,
+                key="project_name_input",
+                label_visibility="collapsed",
+                placeholder="Enter project name",
+            )
+        with name_c2:
+            if st.button("💾 Save name", use_container_width=True):
+                st.session_state.project_name = new_name.strip() or "packing_calculation"
+                st.rerun()
+
         st.download_button(
             label="⬇️ Download Excel report",
             data=excel_data,
-            file_name=f"{file_name_input.strip() or 'packing_calculation'}.xlsx",
+            file_name=f"{st.session_state.project_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
     with clear_col:
+        st.write("")
         st.write("")
         st.write("")
         if st.button("🗑️ Clear all", use_container_width=True):
