@@ -421,37 +421,9 @@ with header_right:
     st.title("Packing Calculator Pre-Alfa Version")
     st.caption("Manual packing calculation for constructions")
 
-with st.expander("Rules used", expanded=True):
-    st.markdown(
-        f"""
-        - Max glazed height: **{MAX_GLAZED_HEIGHT} mm**
-        - If height is **more than 2700 mm**, construction is packed **sideways**
-        - **Pallet width** (physical, used for LDM):
-            - Normal: **construction width + 100 mm**
-            - Sideways: **construction height** (no extra margin, max 6600 mm)
-        - Pallet price tier is based on rounded pallet width (internal):
-            - Normal: **max(construction width, minimum pallet width by height)**
-            - Sideways: **rounded(height + 200)**
-        - Minimum pallet width by height:
-            - **≤ 1000 mm → 400 mm**
-            - **≤ 2000 mm → 800 mm**
-            - **≤ 2700 mm → 1200 mm**
-        - Max pallet weight = **{MAX_PALLET_WEIGHT_KG:.0f} kg**
-        - Max items per pallet (standard) = **{MAX_ITEMS_PER_PALLET}**
-        - Max items per pallet for **Double Sliding, Triple Sliding, 2-leaf+2-fixed, Folding door** = **{MAX_ITEMS_PER_PALLET_HEAVY}**
-        - **Double Sliding, Triple Sliding, 2-leaf+2-fixed, Folding door**:
-            - Glazed if height ≤ 2700 mm **and** unit weight ≤ {MAX_PALLET_WEIGHT_KG:.0f} kg
-            - If weight > {MAX_PALLET_WEIGHT_KG:.0f} kg → packed **unglazed**, glass goes to **separate glass box**
-        - If height > 2700 mm → packed **sideways**, glass goes to **separate glass box**
-        - Max construction height = **{MAX_CONSTRUCTION_HEIGHT} mm** (above this → NOT POSSIBLE)
-        - **Facade**: glass is **always** packed separately (regardless of height or weight)
-        - Glass box price = **{GLASS_BOX_PRICE_EUR:.0f} EUR**
-        - Glass box max weight = **{GLASS_BOX_MAX_WEIGHT_KG:.0f} kg**
-        - **Glass weight** is entered manually per construction (used for glass box calculation when glass is packed separately)
-        - **LDM** is calculated using **pallet width**
-        - **Pallet price** is determined by rounded width tier (not shown in tables)
-        """
-    )
+# with st.expander("Rules used", expanded=False):
+#     st.markdown(...)  # rules hidden — uncomment to restore
+
 
 if "results" not in st.session_state:
     st.session_state.results = []
