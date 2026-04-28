@@ -462,7 +462,7 @@ with left:
 
     st.subheader(_title)
 
-    with st.form("packing_form"):
+    with st.form(f"packing_form_{_e if _e is not None else 'new'}"):
         item_name = st.text_input("Item name", value=_def_name)
 
         item_type = st.selectbox("Type", TYPES,
@@ -490,7 +490,7 @@ with left:
         if submitted:
             if weight_kg <= 0:
                 st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
-            elif glass_mode == "Unglazed" and glass_weight_kg <= 0:
+            elif glass_mode in ("Glazed", "Unglazed") and glass_weight_kg <= 0:
                 st.warning("⚠️ Glass weight is 0 — please enter the glass weight before adding.")
             else:
                 construction = Construction(
@@ -501,7 +501,7 @@ with left:
                     qty=int(qty),
                     weight_kg=float(weight_kg),
                     glass_mode=glass_mode,
-                    glass_weight_kg=float(glass_weight_kg) if glass_mode == "Unglazed" else 0.0,
+                    glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
                 )
                 result = calculate_construction(construction)
                 if _e is not None:
@@ -571,7 +571,7 @@ with right:
         qty=int(qty),
         weight_kg=float(weight_kg),
         glass_mode=glass_mode,
-        glass_weight_kg=float(glass_weight_kg) if glass_mode == "Unglazed" else 0.0,
+        glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
     )
 
     preview_df = pd.DataFrame([calculate_construction(preview)])
