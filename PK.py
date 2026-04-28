@@ -346,6 +346,26 @@ def build_pallet_outputs(results_df: pd.DataFrame):
     return pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm
 
 
+def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: int, glass_cost: float, glass_ldm: float, total_glass_weight: float) -> pd.DataFrame:
+    """Append glass box rows to pallet summary."""
+    if glass_boxes <= 0:
+        return pallet_summary_df
+    last_pallet_no = int(pallet_summary_df["Pallet no"].max()) if not pallet_summary_df.empty else 0
+    glass_rows = []
+    for i in range(glass_boxes):
+        glass_rows.append({
+            "Pallet no": last_pallet_no + i + 1,
+            "Pallet weight (kg)": round(total_glass_weight / glass_boxes, 2),
+            "Constructions count": "-",
+            "Units count": "-",
+            "Pallet width (mm)": 1200,
+            "Pallet price (EUR)": glass_cost / glass_boxes,
+            "Pallet LDM": round(glass_ldm / glass_boxes, 3),
+            "Note": "GLASS BOX",
+        })
+    glass_df = pd.DataFrame(glass_rows)
+    return pd.concat([pallet_summary_df, glass_df], ignore_index=True)
+
 # ============================================================
 # GLASS BOXES
 # ============================================================
@@ -612,6 +632,11 @@ if st.session_state.results:
     total_packaging_cost = total_pallet_cost + glass_cost
     total_ldm = total_pallet_ldm + glass_ldm
 
+    # Add glass boxes to pallet summary
+    pallet_summary_with_glass_df = add_glass_to_pallet_summary(
+        pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight
+    )
+
     kpi_df = pd.DataFrame(
         [
             {
@@ -637,15 +662,15 @@ if st.session_state.results:
 
     st.dataframe(kpi_df, use_container_width=True)
 
-    if not pallet_summary_df.empty:
+    if not pallet_summary_with_glass_df.empty:
         st.subheader("Pallet summary")
-        st.dataframe(pallet_summary_df, use_container_width=True)
+        st.dataframe(pallet_summary_with_glass_df, use_container_width=True)
 
     if not plan_df.empty:
         st.subheader("Packing plan")
         st.dataframe(plan_df, use_container_width=True)
 
-    excel_data = make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df)
+    excel_data = make_excel_file(results_df, pallet_summary_with_glass_df, plan_df, kpi_df)
 
     dl_col, clear_col = st.columns([3, 1])
     with dl_col:
