@@ -686,7 +686,6 @@ if st.session_state.results:
         with name_c2:
             if st.button("💾 Save name", use_container_width=True):
                 st.session_state.project_name = new_name.strip() or "packing_calculation"
-                st.rerun()
 
         st.download_button(
             label="⬇️ Download Excel report",
