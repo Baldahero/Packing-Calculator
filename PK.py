@@ -25,9 +25,7 @@ TRUCK_WIDTH_M = 2.0
 # Types with special glazing rule: glazed only if height <= 2700 and weight <= 1000 kg
 # Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
 HEAVY_GLAZING_TYPES = {
-    "double sliding door",
-    "triple sliding door",
-    "2-leaf+2-fixed sliding door",
+    "sliding door",
     "folding door",
 }
 
@@ -455,10 +453,14 @@ if "edit_idx" not in st.session_state:
 left, right = st.columns([1, 1])
 
 TYPES = [
-    "Door", "Window", "Fixed Window",
-    "Double Sliding Door", "Triple Sliding Door",
-    "2-leaf+2-fixed Sliding Door", "Folding Door",
-    "Door + Sidelight", "Window + Sidelight", "Facade",
+    "Door",
+    "Window",
+    "Fixed Window",
+    "Sliding Door",
+    "Folding Door",
+    "Door + Sidelight",
+    "Window + Sidelight",
+    "Facade",
 ]
 
 with left:
