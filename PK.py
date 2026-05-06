@@ -455,9 +455,6 @@ if "project_name" not in st.session_state:
 if "edit_idx" not in st.session_state:
     st.session_state.edit_idx = None
 
-if "selected_type" not in st.session_state:
-    st.session_state.selected_type = TYPES[0]
-
 TYPES = [
     "Door",
     "Window",
@@ -468,6 +465,11 @@ TYPES = [
     "Window + Sidelight",
     "Facade",
 ]
+
+if "selected_type" not in st.session_state:
+    st.session_state.selected_type = TYPES[0]
+
+left, right = st.columns([1, 1])
 
 with left:
     # Prefill values from edit state if editing
