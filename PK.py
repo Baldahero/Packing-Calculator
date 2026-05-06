@@ -83,10 +83,15 @@ def round_up_pallet_width(size_mm: float) -> int:
 
 
 def real_pallet_width(width_mm: float, height_mm: float) -> float:
-    """Physical pallet width: height if packed sideways, else width+100."""
+    """Physical pallet width based on construction width/length.
+    <= 3000mm: width + 100, > 3000mm: width + 200.
+    If packed sideways: same rule applies to height.
+    """
     if height_mm > MAX_GLAZED_HEIGHT:
-        return height_mm
-    return width_mm + 100
+        dim = height_mm
+    else:
+        dim = width_mm
+    return dim + 200 if dim > 3000 else dim + 100
 
 
 def pallet_price_eur(width_mm: float) -> float:
@@ -490,8 +495,13 @@ with left:
         item_type = st.selectbox("Type", TYPES,
             index=TYPES.index(_def_type) if _def_type in TYPES else 0)
 
-        width_mm  = st.number_input("Width (mm)",  min_value=1.0,  value=_def_width,  step=1.0)
-        height_mm = st.number_input("Height (mm)", min_value=1.0,  value=_def_height, step=1.0)
+        width_mm  = st.number_input("Width (mm)",  min_value=1.0,  value=_def_width,  step=1.0) if item_type != "Facade" else 0.0
+        height_mm = st.number_input("Height (mm)", min_value=1.0,  value=_def_height, step=1.0) if item_type != "Facade" else 0.0
+
+        if item_type == "Facade":
+            length_mm = st.number_input("Length (mm)", min_value=1.0, value=_def_width if _def_width > 0 else 1000.0, step=1.0)
+            width_mm = length_mm
+            height_mm = 1.0  # facade has no height concept
         qty       = st.number_input("Quantity",    min_value=1,    value=_def_qty,    step=1)
         weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=_def_weight, step=0.01)
 
