@@ -455,7 +455,8 @@ if "project_name" not in st.session_state:
 if "edit_idx" not in st.session_state:
     st.session_state.edit_idx = None
 
-left, right = st.columns([1, 1])
+if "selected_type" not in st.session_state:
+    st.session_state.selected_type = TYPES[0]
 
 TYPES = [
     "Door",
@@ -487,21 +488,31 @@ with left:
         _def_qty, _def_weight, _def_mode, _def_glass_w = 1, 0.0, "Glazed", 0.0
         _title = "Add construction"
 
+    # Detect if facade is selected (for field visibility)
+    _current_type = st.session_state.get("selected_type", _def_type)
+
     st.subheader(_title)
+
+    # Type selector outside form so facade detection works immediately
+    selected_type_ui = st.selectbox(
+        "Type",
+        TYPES,
+        index=TYPES.index(_current_type) if _current_type in TYPES else 0,
+        key="selected_type",
+    )
 
     with st.form(f"packing_form_{_e if _e is not None else 'new'}"):
         item_name = st.text_input("Item name", value=_def_name)
+        item_type = selected_type_ui
+        is_facade_form = (selected_type_ui == "Facade")
 
-        item_type = st.selectbox("Type", TYPES,
-            index=TYPES.index(_def_type) if _def_type in TYPES else 0)
-
-        width_mm  = st.number_input("Width (mm)",  min_value=1.0,  value=_def_width,  step=1.0) if item_type != "Facade" else 0.0
-        height_mm = st.number_input("Height (mm)", min_value=1.0,  value=_def_height, step=1.0) if item_type != "Facade" else 0.0
-
-        if item_type == "Facade":
-            length_mm = st.number_input("Length (mm)", min_value=1.0, value=_def_width if _def_width > 0 else 1000.0, step=1.0)
-            width_mm = length_mm
-            height_mm = 1.0  # facade has no height concept
+        if is_facade_form:
+            facade_length = st.number_input("Length (mm)", min_value=1.0, value=_def_width if _def_width > 1.0 else 1000.0, step=1.0)
+            width_mm  = facade_length
+            height_mm = 1.0
+        else:
+            width_mm  = st.number_input("Width (mm)",  min_value=1.0, value=_def_width,  step=1.0)
+            height_mm = st.number_input("Height (mm)", min_value=1.0, value=_def_height, step=1.0)
         qty       = st.number_input("Quantity",    min_value=1,    value=_def_qty,    step=1)
         weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=_def_weight, step=0.01)
 
