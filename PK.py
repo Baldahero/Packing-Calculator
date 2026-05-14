@@ -18,6 +18,7 @@ MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
 
 MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
+GLASS_BOX_PRICE_EUR = 180.0
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
@@ -273,8 +274,6 @@ def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
                     "items": [item],
                 }
             )
-
-    return pallets
 
     return pallets
 
