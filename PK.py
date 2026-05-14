@@ -18,6 +18,8 @@ MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
 
 MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
+MAX_SLIDING_WIDTH = 5960       # max width for fully assembled sliding door; above this → SPLIT
+SPLIT_PALLET_WIDTH = 5960 + 200  # pallet width for split sliding door
 GLASS_BOX_PRICE_EUR = 180.0
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
@@ -158,7 +160,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         packed_as = "UNGLAZED"
         glass_separate = "YES"
         notes = "Glass packed separately"
-        if packed_sideways:
+        if construction.item_type.lower() == "sliding door" and construction.width_mm > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif packed_sideways:
             notes = "Glass packed separately; construction packed sideways"
 
     elif mode == "Glazed":
@@ -167,6 +173,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = "Facade — glass always packed separately"
+        elif construction.item_type.lower() == "sliding door" and construction.width_mm > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
         elif packed_sideways:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
@@ -295,7 +306,7 @@ def _get_pallet_width(item) -> float:
 
 
 def build_pallet_outputs(results_df: pd.DataFrame):
-    valid_df = results_df[results_df["Packed as"] != "NOT POSSIBLE"].copy()
+    valid_df = results_df[~results_df["Packed as"].isin(["NOT POSSIBLE"])].copy()
     if valid_df.empty:
         return pd.DataFrame(), pd.DataFrame(), 0.0, 0.0
 
