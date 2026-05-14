@@ -17,7 +17,7 @@ MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
 
-GLASS_BOX_PRICE_EUR = 180.0
+MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
 GLASS_BOX_MAX_WEIGHT_KG = 1000.0
 GLASS_PALLET_WIDTH_MM = 1200
 TRUCK_WIDTH_M = 2.0
@@ -174,6 +174,10 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass; glass packed separately"
+        elif is_heavy_type and construction.width_mm > MAX_GLAZED_WIDTH_HEAVY:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = f"Width exceeds {MAX_GLAZED_WIDTH_HEAVY} mm — glass packed separately"
         else:
             packed_as = "GLAZED"
             notes = "Can be packed with glass"
