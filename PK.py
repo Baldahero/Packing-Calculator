@@ -17,7 +17,7 @@ MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
 
-MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
+MAX_GLAZED_WIDTH_HEAVY = 5000  # max width for glazed sliding/folding doors
 MAX_SLIDING_WIDTH = 5960       # max width for fully assembled sliding door; above this → SPLIT
 SPLIT_PALLET_WIDTH = 5960 + 200  # pallet width for split sliding door
 GLASS_BOX_PRICE_EUR = 180.0
