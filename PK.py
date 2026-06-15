@@ -195,6 +195,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         notes += "; construction packed sideways"
 
     max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
+    if packed_sideways:
+        max_per_pallet = 1
 
     # Always store glass weight for visibility; it's used for pallet weight when glazed together
     stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
