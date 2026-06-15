@@ -17,7 +17,7 @@ MAX_PALLET_WEIGHT_KG = 1000.0
 MAX_ITEMS_PER_PALLET = 6
 MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
 
-MAX_GLAZED_WIDTH_HEAVY = 5000  # max width for glazed sliding/folding doors
+MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
 MAX_SLIDING_WIDTH = 5960       # max width for fully assembled sliding door; above this → SPLIT
 SPLIT_PALLET_WIDTH = 5960 + 200  # pallet width for split sliding door
 GLASS_BOX_PRICE_EUR = 180.0
@@ -86,15 +86,12 @@ def round_up_pallet_width(size_mm: float) -> int:
 
 
 def real_pallet_width(width_mm: float, height_mm: float) -> float:
-    """Physical pallet width based on construction width/length.
+    """Physical pallet width based on construction width.
     <= 3000mm: width + 100, > 3000mm: width + 200.
-    If packed sideways: same rule applies to height.
+    Height does not affect pallet width (constructions are packed diagonally when height > 2700mm,
+    but the pallet footprint is still determined by width).
     """
-    if height_mm > MAX_GLAZED_HEIGHT:
-        dim = height_mm
-    else:
-        dim = width_mm
-    return dim + 200 if dim > 3000 else dim + 100
+    return width_mm + 200 if width_mm > 3000 else width_mm + 100
 
 
 def pallet_price_eur(width_mm: float) -> float:
