@@ -97,20 +97,20 @@ def real_pallet_width(width_mm: float, height_mm: float) -> float:
 def pallet_price_eur(width_mm: float) -> float:
     w = float(width_mm or 0)
     if w <= 1000:
-        return 31.0
+        return 36.0
     if w <= 1500:
-        return 44.0
+        return 52.0
     if w <= 2500:
-        return 60.0
+        return 80.0
     if w <= 3500:
-        return 72.0
+        return 95.0
     if w <= 5000:
-        return 94.0
+        return 111.0
     if w <= 6000:
-        return 120.0
+        return 145.0
     if w <= 6600:
-        return 120.0
-    return 120.0
+        return 145.0
+    return 145.0
 
 
 def ldm_from_width(width_mm: float, count: int = 1) -> float:
