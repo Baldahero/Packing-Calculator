@@ -773,18 +773,72 @@ st.caption("Upload a constructions template or previously saved report to contin
 
 imp_dl_col, imp_up_col = st.columns([1, 2])
 with imp_dl_col:
-    # Offer template download
-    try:
-        with open("/mnt/user-data/outputs/import_template.xlsx", "rb") as f:
-            st.download_button(
-                label="⬇️ Download input template",
-                data=f.read(),
-                file_name="constructions_template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-    except Exception:
-        pass
+    # Generate template in memory
+    def make_import_template() -> bytes:
+        from openpyxl import Workbook
+        from openpyxl.worksheet.datavalidation import DataValidation
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from io import BytesIO
+
+        wb = Workbook()
+
+        # ---- Constructions sheet ----
+        ws = wb.active
+        ws.title = "Constructions"
+        headers = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+                   "Unit weight (kg)", "Glass weight (kg)", "Glass mode", "Rotated"]
+        ws.append(headers)
+
+        header_fill = PatternFill("solid", fgColor="1F4E79")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        dv_type = DataValidation(type="list",
+            formula1='"Door,Window,Fixed Window,Sliding Door,Folding Door,Door + Sidelight,Window + Sidelight"',
+            showDropDown=False)
+        ws.add_data_validation(dv_type)
+        dv_type.sqref = "B2:B1000"
+
+        dv_glass = DataValidation(type="list",
+            formula1='"Glazed,Unglazed,Without glass"', showDropDown=False)
+        ws.add_data_validation(dv_glass)
+        dv_glass.sqref = "H2:H1000"
+
+        dv_rot = DataValidation(type="list", formula1='"NO,YES"', showDropDown=False)
+        ws.add_data_validation(dv_rot)
+        dv_rot.sqref = "I2:I1000"
+
+        for col, width in zip("ABCDEFGHI", [22, 20, 14, 14, 8, 18, 18, 16, 10]):
+            ws.column_dimensions[col].width = width
+
+        # ---- Facades sheet ----
+        ws_f = wb.create_sheet("Facades")
+        facade_headers = ["Item", "Length (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"]
+        ws_f.append(facade_headers)
+
+        facade_fill = PatternFill("solid", fgColor="375623")
+        for cell in ws_f[1]:
+            cell.fill = facade_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        for col, width in zip("ABCDE", [22, 14, 8, 18, 18]):
+            ws_f.column_dimensions[col].width = width
+
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    st.download_button(
+        label="⬇️ Download input template",
+        data=make_import_template(),
+        file_name="constructions_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 with imp_up_col:
     uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], label_visibility="collapsed")
