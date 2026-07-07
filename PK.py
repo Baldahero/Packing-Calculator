@@ -88,11 +88,11 @@ def round_up_pallet_width(size_mm: float) -> int:
 
 def real_pallet_width(width_mm: float, height_mm: float) -> float:
     """Physical pallet width based on construction width.
-    <= 3000mm: width + 100, > 3000mm: width + 200.
+    < 3000mm: width + 100, >= 3000mm: width + 200.
     Height does not affect pallet width (constructions are packed diagonally when height > 2700mm,
     but the pallet footprint is still determined by width).
     """
-    return width_mm + 200 if width_mm > 3000 else width_mm + 100
+    return width_mm + 200 if width_mm >= 3000 else width_mm + 100
 
 
 def pallet_price_eur(width_mm: float) -> float:
