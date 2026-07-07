@@ -837,109 +837,183 @@ if uploaded is not None:
     try:
         xl_sheets = pd.read_excel(uploaded, sheet_name=None)
 
-        # ---- Constructions sheet ----
-        xl = xl_sheets.get("Constructions", pd.DataFrame())
-        template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
-        is_template = template_cols.issubset(set(xl.columns))
-
         def parse_num(val) -> float:
             try:
                 s = str(val).strip()
                 if s in ("", "nan", "None"):
                     return 0.0
-                # Handle "1 150,0" → "1150.0"
-                s = s.replace("\xa0", "").replace(" ", "")  # remove spaces/nbsp
-                s = s.replace(",", ".")                      # comma → dot
+                s = s.replace("\xa0", "").replace(" ", "")
+                s = s.replace(",", ".")
                 return float(s)
             except Exception:
                 return 0.0
 
-        def build_row(row):
-            glass_mode = str(row.get("Glass mode", "")).strip()
-            if glass_mode not in ("Glazed", "Unglazed", "Without glass"):
-                glass_mode = "Glazed" if parse_num(row.get("Glass weight (kg)", 0)) > 0 else "Without glass"
-            rotated = str(row.get("Rotated", "NO")).strip().upper() == "YES"
-            item_type = str(row.get("Type", "")).strip()
-            if item_type not in ["Door", "Window", "Fixed Window", "Sliding Door",
-                                 "Folding Door", "Door + Sidelight", "Window + Sidelight"]:
-                item_type = "Door"
-            c = Construction(
-                item_name=str(row.get("Item", "Unnamed")).strip(),
-                item_type=item_type,
-                width_mm=parse_num(row.get("Width (mm)", 1000)),
-                height_mm=parse_num(row.get("Height (mm)", 1000)),
-                qty=max(1, int(parse_num(row.get("Qty", 1)))),
-                weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
-                glass_mode=glass_mode,
-                glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
-                rotated=rotated,
-            )
-            return calculate_construction(c)
+        # ---- Detect NorDan Calculation file (Sheet1 with horizontal layout) ----
+        is_nordan_calc = "Sheet1" in xl_sheets and "Constructions" not in xl_sheets
 
-        def build_facade_row(row):
-            length = parse_num(row.get("Length (mm)", 1000))
-            c = Construction(
-                item_name=str(row.get("Item", "Unnamed")).strip(),
-                item_type="Facade",
-                width_mm=length,
-                height_mm=1.0,
-                qty=max(1, int(parse_num(row.get("Qty", 1)))),
-                weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
-                glass_mode="Glazed",  # facades always glass separate — handled in calculate_construction
-                glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
-                rotated=False,
-            )
-            return calculate_construction(c)
+        if is_nordan_calc:
+            df_raw = pd.read_excel(uploaded, sheet_name="Sheet1", header=None)
+            # Find vertical table header row (has "Item number", "Production line", etc.)
+            header_row = None
+            for i, row in df_raw.iterrows():
+                vals = [str(v).strip() for v in row.values]
+                if "Item number" in vals and "Production line" in vals and "Total width" in vals:
+                    header_row = i
+                    break
 
-        if is_template:
-            valid_const = xl[xl["Item"].astype(str).str.strip().isin(
-                ["", "nan"]) == False]
-            missing_type = valid_const[~valid_const["Type"].astype(str).str.strip().isin(
-                ["Door","Window","Fixed Window","Sliding Door","Folding Door",
-                 "Door + Sidelight","Window + Sidelight"])]
+            if header_row is None:
+                st.error("❌ Could not find data table in Sheet1")
+            else:
+                df = pd.read_excel(uploaded, sheet_name="Sheet1", header=header_row)
+                df = df.dropna(subset=["Item number"])
+                df = df[df["Item number"].astype(str).str.strip().str.match(r'^\d+\.')]
 
-            # Facades sheet
-            xl_facade = xl_sheets.get("Facades", pd.DataFrame())
-            has_facades = not xl_facade.empty and "Item" in xl_facade.columns
-            valid_facades = xl_facade[xl_facade["Item"].astype(str).str.strip().isin(
-                ["", "nan"]) == False] if has_facades else pd.DataFrame()
+                def build_nordan_row(row):
+                    prod_line = str(row.get("Production line", "")).lower()
+                    if "unglazed" in prod_line:
+                        glass_mode = "Unglazed"
+                    elif "glazed" in prod_line:
+                        glass_mode = "Glazed"
+                    else:
+                        glass_mode = "Without glass"
 
-            st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
+                    glass_w = parse_num(row.get("Glass", row.get("Glass weight (kg)", 0)))
+                    unit_w  = parse_num(row.get("Weight per item", row.get("Unit weight (kg)", 0)))
+                    width   = parse_num(row.get("Total width", row.get("Width (mm)", 1000)))
+                    height  = parse_num(row.get("Total height", row.get("Height (mm)", 1000)))
 
-            col_prev1, col_prev2 = st.columns(2)
-            with col_prev1:
-                st.caption("Constructions")
-                st.dataframe(valid_const[["Item","Type","Width (mm)","Height (mm)","Qty","Glass mode"]],
+                    c = Construction(
+                        item_name=str(row.get("Item number", "Unnamed")).strip(),
+                        item_type="Door",  # default — edit after import
+                        width_mm=max(1.0, width),
+                        height_mm=max(1.0, height),
+                        qty=max(1, int(parse_num(row.get("Number", row.get("Qty", 1))))),
+                        weight_kg=unit_w,
+                        glass_mode=glass_mode,
+                        glass_weight_kg=glass_w,
+                        rotated=False,
+                    )
+                    return calculate_construction(c)
+
+                st.success(f"✅ Found {len(df)} construction(s) from NorDan Calculation file")
+                st.caption("⚠️ Type set to 'Door' by default — please review via ✏️ Edit after import")
+                st.dataframe(df[["Item number", "Production line", "Total width", "Total height",
+                                 "Number", "Weight per item", "Glass"]].reset_index(drop=True),
                              use_container_width=True)
-            with col_prev2:
-                if not valid_facades.empty:
-                    st.caption("Facades")
-                    st.dataframe(valid_facades, use_container_width=True)
 
-            imp_col1, imp_col2 = st.columns([1, 1])
-            with imp_col1:
-                if st.button("⬆️ Import and replace all", use_container_width=True):
-                    rows = [build_row(row) for _, row in valid_const.iterrows()]
-                    rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
-                    st.session_state.results = rows
-                    st.session_state.edit_idx = None
-                    st.success(f"Imported {len(rows)} item(s)!")
-                    if len(missing_type) > 0:
-                        st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
-                    st.rerun()
-            with imp_col2:
-                if st.button("➕ Import and add to existing", use_container_width=True):
-                    if "results" not in st.session_state:
-                        st.session_state.results = []
-                    rows = [build_row(row) for _, row in valid_const.iterrows()]
-                    rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
-                    st.session_state.results.extend(rows)
-                    st.success(f"Added {len(rows)} item(s) to existing list!")
-                    if len(missing_type) > 0:
-                        st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
-                    st.rerun()
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        st.session_state.results = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(st.session_state.results)} construction(s)!")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        new_rows = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.results.extend(new_rows)
+                        st.success(f"Added {len(new_rows)} construction(s)!")
+                        st.rerun()
+
         else:
-            st.error("❌ Unrecognised file format. Please use the template.")
+            # ---- Standard template format ----
+            xl = xl_sheets.get("Constructions", pd.DataFrame())
+            template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
+            is_template = template_cols.issubset(set(xl.columns))
+
+            def build_row(row):
+                raw_mode = str(row.get("Glass mode", "")).strip()
+                # Map NorDan production line strings to glass mode
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                elif raw_mode in ("Glazed", "Unglazed", "Without glass"):
+                    glass_mode = raw_mode
+                else:
+                    glass_mode = "Glazed" if parse_num(row.get("Glass weight (kg)", 0)) > 0 else "Without glass"
+                rotated = str(row.get("Rotated", "NO")).strip().upper() == "YES"
+                item_type = str(row.get("Type", "")).strip()
+                if item_type not in ["Door", "Window", "Fixed Window", "Sliding Door",
+                                     "Folding Door", "Door + Sidelight", "Window + Sidelight"]:
+                    item_type = "Door"
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(row.get("Width (mm)", 1000))),
+                    height_mm=max(1.0, parse_num(row.get("Height (mm)", 1000))),
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=rotated,
+                )
+                return calculate_construction(c)
+
+            def build_facade_row(row):
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type="Facade",
+                    width_mm=max(1.0, parse_num(row.get("Length (mm)", 1000))),
+                    height_mm=1.0,
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode="Glazed",
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=False,
+                )
+                return calculate_construction(c)
+
+            if is_template:
+                valid_const = xl[~xl["Item"].astype(str).str.strip().isin(["", "nan"])]
+                missing_type = valid_const[~valid_const["Type"].astype(str).str.strip().isin(
+                    ["Door","Window","Fixed Window","Sliding Door","Folding Door",
+                     "Door + Sidelight","Window + Sidelight"])]
+
+                xl_facade = xl_sheets.get("Facades", pd.DataFrame())
+                has_facades = not xl_facade.empty and "Item" in xl_facade.columns
+                valid_facades = xl_facade[~xl_facade["Item"].astype(str).str.strip().isin(
+                    ["", "nan"])] if has_facades else pd.DataFrame()
+
+                st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
+
+                col_prev1, col_prev2 = st.columns(2)
+                with col_prev1:
+                    st.caption("Constructions")
+                    st.dataframe(valid_const[["Item","Type","Width (mm)","Height (mm)","Qty","Glass mode"]],
+                                 use_container_width=True)
+                with col_prev2:
+                    if not valid_facades.empty:
+                        st.caption("Facades")
+                        st.dataframe(valid_facades, use_container_width=True)
+
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results = rows
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(rows)} item(s)!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results.extend(rows)
+                        st.success(f"Added {len(rows)} item(s) to existing list!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+            else:
+                st.error("❌ Unrecognised file format. Please use the NorDan Calculation file or the template.")
 
     except Exception as e:
         st.error(f"❌ Error reading file: {e}")
