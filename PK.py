@@ -769,73 +769,127 @@ else:
 
 st.divider()
 st.subheader("📂 Import from Excel")
-st.caption("Upload a previously saved packing_calculation.xlsx to continue editing")
+st.caption("Upload a constructions template or previously saved report to continue editing")
 
-uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], label_visibility="collapsed")
+imp_dl_col, imp_up_col = st.columns([1, 2])
+with imp_dl_col:
+    # Offer template download
+    try:
+        with open("/mnt/user-data/outputs/import_template.xlsx", "rb") as f:
+            st.download_button(
+                label="⬇️ Download input template",
+                data=f.read(),
+                file_name="constructions_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+    except Exception:
+        pass
+
+with imp_up_col:
+    uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], label_visibility="collapsed")
 
 if uploaded is not None:
     try:
-        xl = pd.read_excel(uploaded, sheet_name="Constructions")
-        required_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty",
-                         "Unit weight (kg)", "Glass weight (kg)", "Glass mode",
-                         "Packed as", "Glass separate", "Packed sideways",
-                         "Max per pallet", "Pallet width (mm)", "Notes"}
-        missing = required_cols - set(xl.columns)
-        if missing:
-            st.error(f"❌ Missing columns in file: {missing}")
-        else:
-            st.success(f"✅ Found {len(xl)} construction(s) — ready to import")
-            st.dataframe(xl[["Item", "Type", "Width (mm)", "Height (mm)",
-                              "Qty", "Unit weight (kg)", "Glass weight (kg)", "Glass mode"]],
-                         use_container_width=True)
+        xl_sheets = pd.read_excel(uploaded, sheet_name=None)
 
-            imp_col1, imp_col2 = st.columns([1, 3])
+        # ---- Constructions sheet ----
+        xl = xl_sheets.get("Constructions", pd.DataFrame())
+        template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
+        is_template = template_cols.issubset(set(xl.columns))
+
+        def parse_num(val):
+            try:
+                return float(str(val).replace(" ", "").replace(",", "."))
+            except Exception:
+                return 0.0
+
+        def build_row(row):
+            glass_mode = str(row.get("Glass mode", "")).strip()
+            if glass_mode not in ("Glazed", "Unglazed", "Without glass"):
+                glass_mode = "Glazed" if parse_num(row.get("Glass weight (kg)", 0)) > 0 else "Without glass"
+            rotated = str(row.get("Rotated", "NO")).strip().upper() == "YES"
+            item_type = str(row.get("Type", "")).strip()
+            if item_type not in ["Door", "Window", "Fixed Window", "Sliding Door",
+                                 "Folding Door", "Door + Sidelight", "Window + Sidelight"]:
+                item_type = "Door"
+            c = Construction(
+                item_name=str(row.get("Item", "Unnamed")).strip(),
+                item_type=item_type,
+                width_mm=parse_num(row.get("Width (mm)", 1000)),
+                height_mm=parse_num(row.get("Height (mm)", 1000)),
+                qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                glass_mode=glass_mode,
+                glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                rotated=rotated,
+            )
+            return calculate_construction(c)
+
+        def build_facade_row(row):
+            length = parse_num(row.get("Length (mm)", 1000))
+            c = Construction(
+                item_name=str(row.get("Item", "Unnamed")).strip(),
+                item_type="Facade",
+                width_mm=length,
+                height_mm=1.0,
+                qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                glass_mode="Glazed",  # facades always glass separate — handled in calculate_construction
+                glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                rotated=False,
+            )
+            return calculate_construction(c)
+
+        if is_template:
+            valid_const = xl[xl["Item"].astype(str).str.strip().isin(
+                ["", "nan"]) == False]
+            missing_type = valid_const[~valid_const["Type"].astype(str).str.strip().isin(
+                ["Door","Window","Fixed Window","Sliding Door","Folding Door",
+                 "Door + Sidelight","Window + Sidelight"])]
+
+            # Facades sheet
+            xl_facade = xl_sheets.get("Facades", pd.DataFrame())
+            has_facades = not xl_facade.empty and "Item" in xl_facade.columns
+            valid_facades = xl_facade[xl_facade["Item"].astype(str).str.strip().isin(
+                ["", "nan"]) == False] if has_facades else pd.DataFrame()
+
+            st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
+
+            col_prev1, col_prev2 = st.columns(2)
+            with col_prev1:
+                st.caption("Constructions")
+                st.dataframe(valid_const[["Item","Type","Width (mm)","Height (mm)","Qty","Glass mode"]],
+                             use_container_width=True)
+            with col_prev2:
+                if not valid_facades.empty:
+                    st.caption("Facades")
+                    st.dataframe(valid_facades, use_container_width=True)
+
+            imp_col1, imp_col2 = st.columns([1, 1])
             with imp_col1:
                 if st.button("⬆️ Import and replace all", use_container_width=True):
-                    imported = []
-                    for _, row in xl.iterrows():
-                        imported.append({
-                            "Item":              str(row.get("Item", "Unnamed")),
-                            "Type":              str(row.get("Type", "Door")),
-                            "Width (mm)":        float(row.get("Width (mm)", 1000)),
-                            "Height (mm)":       float(row.get("Height (mm)", 1000)),
-                            "Qty":               int(row.get("Qty", 1)),
-                            "Unit weight (kg)":  float(row.get("Unit weight (kg)", 0)),
-                            "Glass weight (kg)": float(row.get("Glass weight (kg)", 0)),
-                            "Glass mode":        str(row.get("Glass mode", "Glazed")),
-                            "Packed as":         str(row.get("Packed as", "UNGLAZED")),
-                            "Glass separate":    str(row.get("Glass separate", "NO")),
-                            "Packed sideways":   str(row.get("Packed sideways", "NO")),
-                            "Max per pallet":    int(row.get("Max per pallet", 6)),
-                            "Pallet width (mm)": float(row.get("Pallet width (mm)", 1000)),
-                            "Notes":             str(row.get("Notes", "")),
-                        })
-                    st.session_state.results = imported
+                    rows = [build_row(row) for _, row in valid_const.iterrows()]
+                    rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                    st.session_state.results = rows
                     st.session_state.edit_idx = None
-                    st.success(f"Imported {len(imported)} construction(s)!")
+                    st.success(f"Imported {len(rows)} item(s)!")
+                    if len(missing_type) > 0:
+                        st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
                     st.rerun()
             with imp_col2:
                 if st.button("➕ Import and add to existing", use_container_width=True):
                     if "results" not in st.session_state:
                         st.session_state.results = []
-                    for _, row in xl.iterrows():
-                        st.session_state.results.append({
-                            "Item":              str(row.get("Item", "Unnamed")),
-                            "Type":              str(row.get("Type", "Door")),
-                            "Width (mm)":        float(row.get("Width (mm)", 1000)),
-                            "Height (mm)":       float(row.get("Height (mm)", 1000)),
-                            "Qty":               int(row.get("Qty", 1)),
-                            "Unit weight (kg)":  float(row.get("Unit weight (kg)", 0)),
-                            "Glass weight (kg)": float(row.get("Glass weight (kg)", 0)),
-                            "Glass mode":        str(row.get("Glass mode", "Glazed")),
-                            "Packed as":         str(row.get("Packed as", "UNGLAZED")),
-                            "Glass separate":    str(row.get("Glass separate", "NO")),
-                            "Packed sideways":   str(row.get("Packed sideways", "NO")),
-                            "Max per pallet":    int(row.get("Max per pallet", 6)),
-                            "Pallet width (mm)": float(row.get("Pallet width (mm)", 1000)),
-                            "Notes":             str(row.get("Notes", "")),
-                        })
-                    st.success(f"Added {len(xl)} construction(s) to existing list!")
+                    rows = [build_row(row) for _, row in valid_const.iterrows()]
+                    rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                    st.session_state.results.extend(rows)
+                    st.success(f"Added {len(rows)} item(s) to existing list!")
+                    if len(missing_type) > 0:
+                        st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
                     st.rerun()
+        else:
+            st.error("❌ Unrecognised file format. Please use the template.")
+
     except Exception as e:
         st.error(f"❌ Error reading file: {e}")
