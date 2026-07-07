@@ -52,6 +52,7 @@ class Construction:
     weight_kg: float
     glass_mode: str = "Glazed"  # "Glazed" | "Unglazed" | "Without glass"
     glass_weight_kg: float = 0.0
+    rotated: bool = False  # if True, width and height are swapped for packing
 
 
 # ============================================================
@@ -118,13 +119,21 @@ def ldm_from_width(width_mm: float, count: int = 1) -> float:
 
 
 def calculate_construction(construction: Construction) -> Dict[str, object]:
-    real_width = real_pallet_width(construction.width_mm, construction.height_mm)
-    packed_sideways = construction.height_mm > MAX_GLAZED_HEIGHT
+    # If rotated, swap width and height for all packing calculations
+    if construction.rotated:
+        calc_width  = construction.height_mm
+        calc_height = construction.width_mm
+    else:
+        calc_width  = construction.width_mm
+        calc_height = construction.height_mm
+
+    real_width = real_pallet_width(calc_width, calc_height)
+    packed_sideways = calc_height > MAX_GLAZED_HEIGHT
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
     is_facade = construction.item_type.lower() in FACADE_TYPES
-    mode = construction.glass_mode  # "Glazed" | "Unglazed" | "Without glass"
+    mode = construction.glass_mode
 
-    if construction.height_mm > MAX_CONSTRUCTION_HEIGHT:
+    if calc_height > MAX_CONSTRUCTION_HEIGHT:
         return {
             "Item": construction.item_name,
             "Type": construction.item_type,
@@ -134,6 +143,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Unit weight (kg)": float(construction.weight_kg),
             "Glass weight (kg)": float(construction.glass_weight_kg),
             "Glass mode": mode,
+            "Rotated": "YES" if construction.rotated else "NO",
             "Packed as": "NOT POSSIBLE",
             "Glass separate": "N/A",
             "Packed sideways": "N/A",
@@ -170,7 +180,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = "Facade — glass always packed separately"
-        elif construction.item_type.lower() == "sliding door" and construction.width_mm > MAX_SLIDING_WIDTH:
+        elif construction.item_type.lower() == "sliding door" and calc_width > MAX_SLIDING_WIDTH:
             packed_as = "SPLIT"
             glass_separate = "YES"
             real_width = float(SPLIT_PALLET_WIDTH)
@@ -183,7 +193,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass; glass packed separately"
-        elif is_heavy_type and construction.width_mm > MAX_GLAZED_WIDTH_HEAVY:
+        elif is_heavy_type and calc_width > MAX_GLAZED_WIDTH_HEAVY:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
             notes = f"Width exceeds {MAX_GLAZED_WIDTH_HEAVY} mm — glass packed separately"
@@ -201,6 +211,9 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     # Always store glass weight for visibility; it's used for pallet weight when glazed together
     stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
 
+    if construction.rotated and "rotated" not in notes.lower():
+        notes += "; packed rotated (width↔height swapped)"
+
     return {
         "Item": construction.item_name,
         "Type": construction.item_type,
@@ -210,6 +223,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Unit weight (kg)": float(construction.weight_kg),
         "Glass weight (kg)": stored_glass_weight,
         "Glass mode": mode,
+        "Rotated": "YES" if construction.rotated else "NO",
         "Packed as": packed_as,
         "Glass separate": glass_separate,
         "Packed sideways": "YES" if packed_sideways else "NO",
@@ -497,10 +511,11 @@ with left:
         _def_weight   = float(_r.get("Unit weight (kg)", 0.0))
         _def_mode     = _r.get("Glass mode", "Glazed")
         _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0))
+        _def_rotated  = _r.get("Rotated", "NO") == "YES"
         _title = f"✏️ Edit construction: {_def_name}"
     else:
         _def_name, _def_type, _def_width, _def_height = "...", TYPES[0], 1000.0, 1000.0
-        _def_qty, _def_weight, _def_mode, _def_glass_w = 1, 0.0, "Glazed", 0.0
+        _def_qty, _def_weight, _def_mode, _def_glass_w, _def_rotated = 1, 0.0, "Glazed", 0.0, False
         _title = "Add construction"
 
     # Detect if facade is selected (for field visibility)
@@ -542,6 +557,12 @@ with left:
             help="Weight of glass only — required when glass is packed separately",
         )
 
+        rotated = st.checkbox(
+            "Rotated (swap width ↔ height)",
+            value=_def_rotated,
+            help="Use when construction is packed rotated — width and height are swapped for packing calculations. Allows glazed packing if rotated height ≤ 2700mm.",
+        )
+
         _btn_label = "Save changes" if _e is not None else "Calculate and add"
         submitted = st.form_submit_button(_btn_label)
 
@@ -560,6 +581,7 @@ with left:
                     weight_kg=float(weight_kg),
                     glass_mode=glass_mode,
                     glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+                    rotated=rotated,
                 )
                 result = calculate_construction(construction)
                 if _e is not None:
@@ -630,6 +652,7 @@ with right:
         weight_kg=float(weight_kg),
         glass_mode=glass_mode,
         glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+        rotated=rotated,
     )
 
     preview_df = pd.DataFrame([calculate_construction(preview)])
