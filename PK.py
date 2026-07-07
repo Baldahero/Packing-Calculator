@@ -558,13 +558,13 @@ with left:
         _r = st.session_state.results[_e]
         _def_name     = _r.get("Item", "...")
         _def_type     = _r.get("Type", TYPES[0])
-        _def_width    = float(_r.get("Width (mm)", 1000.0))
-        _def_height   = float(_r.get("Height (mm)", 1000.0))
-        _def_qty      = int(_r.get("Qty", 1))
-        _def_weight   = float(_r.get("Unit weight (kg)", 0.0))
+        _def_width    = max(1.0, float(_r.get("Width (mm)", 1000.0) or 1000.0))
+        _def_height   = max(1.0, float(_r.get("Height (mm)", 1000.0) or 1000.0))
+        _def_qty      = max(1, int(_r.get("Qty", 1) or 1))
+        _def_weight   = float(_r.get("Unit weight (kg)", 0.0) or 0.0)
         _def_mode     = _r.get("Glass mode", "Glazed")
-        _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0))
-        _def_rotated  = _r.get("Rotated", "NO") == "YES"
+        _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0) or 0.0)
+        _def_rotated  = str(_r.get("Rotated", "NO")).strip().upper() == "YES"
         _title = f"✏️ Edit construction: {_def_name}"
     else:
         _def_name, _def_type, _def_width, _def_height = "...", TYPES[0], 1000.0, 1000.0
@@ -842,9 +842,15 @@ if uploaded is not None:
         template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
         is_template = template_cols.issubset(set(xl.columns))
 
-        def parse_num(val):
+        def parse_num(val) -> float:
             try:
-                return float(str(val).replace(" ", "").replace(",", "."))
+                s = str(val).strip()
+                if s in ("", "nan", "None"):
+                    return 0.0
+                # Handle "1 150,0" → "1150.0"
+                s = s.replace("\xa0", "").replace(" ", "")  # remove spaces/nbsp
+                s = s.replace(",", ".")                      # comma → dot
+                return float(s)
             except Exception:
                 return 0.0
 
