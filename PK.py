@@ -851,7 +851,71 @@ if uploaded is not None:
         # ---- Detect NorDan Calculation file (Sheet1 with horizontal layout) ----
         is_nordan_calc = "Sheet1" in xl_sheets and "Constructions" not in xl_sheets
 
-        if is_nordan_calc:
+        # ---- Detect Packing file (horizontal layout: rows=params, cols=constructions) ----
+        first_sheet = list(xl_sheets.values())[0]
+        first_col = first_sheet.iloc[:, 0].astype(str).str.strip().tolist() if not first_sheet.empty else []
+        is_packing_format = "Item number" in first_col and "Total width" in first_col
+
+        if is_packing_format:
+            df_raw = list(xl_sheets.values())[0]
+            df_raw = df_raw.set_index(df_raw.columns[0])
+
+            rows = []
+            for col in df_raw.columns:
+                val = lambda r: df_raw.loc[r, col] if r in df_raw.index else None
+                item_name = str(col).strip()
+                if not item_name or item_name in (" ", "nan"):
+                    continue
+
+                raw_type = str(val("Type") or "").strip()
+                item_type = raw_type if raw_type in TYPES else "Door"
+
+                raw_mode = str(val("Glass mode") or "").strip()
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                else:
+                    glass_w_check = parse_num(val("Glass"))
+                    glass_mode = "Glazed" if glass_w_check > 0 else "Without glass"
+
+                rotated = str(val("Rotated") or "NO").strip().upper() == "YES"
+
+                c = Construction(
+                    item_name=item_name,
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(val("Total width"))),
+                    height_mm=max(1.0, parse_num(val("Total height"))),
+                    qty=max(1, int(parse_num(val("Number") or 1))),
+                    weight_kg=parse_num(val("Profiles")),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(val("Glass")),
+                    rotated=rotated,
+                )
+                rows.append(calculate_construction(c))
+
+            st.success(f"✅ Found {len(rows)} construction(s) — ready to import")
+            preview_cols = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+                           "Unit weight (kg)", "Glass weight (kg)", "Glass mode"]
+            st.dataframe(pd.DataFrame(rows)[preview_cols], use_container_width=True)
+
+            imp_col1, imp_col2 = st.columns(2)
+            with imp_col1:
+                if st.button("⬆️ Import and replace all", use_container_width=True):
+                    st.session_state.results = rows
+                    st.session_state.edit_idx = None
+                    st.success(f"Imported {len(rows)} construction(s)!")
+                    st.rerun()
+            with imp_col2:
+                if st.button("➕ Import and add to existing", use_container_width=True):
+                    if "results" not in st.session_state:
+                        st.session_state.results = []
+                    st.session_state.results.extend(rows)
+                    st.success(f"Added {len(rows)} construction(s)!")
+                    st.rerun()
+
+        elif is_nordan_calc:
             df_raw = pd.read_excel(uploaded, sheet_name="Sheet1", header=None)
             # Find vertical table header row (has "Item number", "Production line", etc.)
             header_row = None
