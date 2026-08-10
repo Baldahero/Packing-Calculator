@@ -827,7 +827,7 @@ st.caption("Fill in the template and upload it to calculate packing automaticall
 st.download_button(
     label="⬇️ Download input template",
     data=make_import_template(),
-    file_name="constructions_template.xlsx",
+    file_name="import_template.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
