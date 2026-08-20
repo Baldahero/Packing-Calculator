@@ -29,7 +29,19 @@ TRUCK_WIDTH_M = 2.0
 # Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
 HEAVY_GLAZING_TYPES = {
     "sliding door",
+    "double sliding door",
+    "triple sliding door",
+    "quad sliding door",
     "folding door",
+}
+
+# Number of parts for split sliding doors
+SLIDING_PARTS = {
+    "sliding door": 1,
+    "double sliding door": 2,
+    "triple sliding door": 3,
+    "quad sliding door": 4,
+    "folding door": 1,
 }
 
 # Facades: glass always packed separately regardless of height/weight
@@ -131,6 +143,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     packed_sideways = calc_height > MAX_GLAZED_HEIGHT
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
     is_facade = construction.item_type.lower() in FACADE_TYPES
+    parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
     mode = construction.glass_mode
 
     if calc_height > MAX_CONSTRUCTION_HEIGHT:
@@ -185,6 +198,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             glass_separate = "YES"
             real_width = float(SPLIT_PALLET_WIDTH)
             notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif construction.item_type.lower() in ("double sliding door", "triple sliding door", "quad sliding door") and calc_width > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled ({parts} parts); glass split into {parts} pieces; pallet width = {SPLIT_PALLET_WIDTH} mm"
         elif packed_sideways:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
@@ -214,6 +232,10 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     if construction.rotated and "rotated" not in notes.lower():
         notes += "; packed rotated (width↔height swapped)"
 
+    # For multi-part sliding doors: split glass weight by number of parts
+    glass_parts = parts if (packed_as == "SPLIT" and parts > 1) else 1
+    glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
+
     return {
         "Item": construction.item_name,
         "Type": construction.item_type,
@@ -222,6 +244,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Qty": int(construction.qty),
         "Unit weight (kg)": float(construction.weight_kg),
         "Glass weight (kg)": stored_glass_weight,
+        "Glass parts": int(glass_parts),
+        "Glass weight per part (kg)": float(glass_weight_per_part),
         "Glass mode": mode,
         "Rotated": "YES" if construction.rotated else "NO",
         "Packed as": packed_as,
@@ -407,14 +431,21 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     if separate_glass_df.empty:
         return 0, 0.0, 0.0, 0.0
 
-    # Use glass weight if provided, fallback to unit weight if glass weight is 0
-    glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+    # Use glass weight per part if available (for split sliding doors)
+    if "Glass weight per part (kg)" in separate_glass_df.columns and "Glass parts" in separate_glass_df.columns:
+        glass_w = pd.to_numeric(separate_glass_df["Glass weight per part (kg)"], errors="coerce").fillna(0.0)
+        glass_parts = pd.to_numeric(separate_glass_df["Glass parts"], errors="coerce").fillna(1.0)
+    else:
+        glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+        glass_parts = pd.Series([1.0] * len(separate_glass_df), index=separate_glass_df.index)
+
     unit_w = pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
     effective_glass_w = glass_w.where(glass_w > 0, unit_w)
 
     total_glass_weight = float(
         (
             effective_glass_w
+            * glass_parts
             * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
         ).sum()
     )
@@ -467,7 +498,7 @@ def make_import_template() -> bytes:
         cell.alignment = Alignment(horizontal="center")
 
     dv_type = DataValidation(type="list",
-        formula1='"Door,Window,Fixed Window,Sliding Door,Folding Door,Door + Sidelight,Window + Sidelight"',
+        formula1='"Door,Window,Fixed Window,Sliding Door,Double Sliding Door,Triple Sliding Door,Quad Sliding Door,Folding Door,Door + Sidelight,Window + Sidelight"',
         showDropDown=False)
     ws.add_data_validation(dv_type)
     dv_type.sqref = "B2:B1000"
@@ -545,6 +576,9 @@ TYPES = [
     "Window",
     "Fixed Window",
     "Sliding Door",
+    "Double Sliding Door",
+    "Triple Sliding Door",
+    "Quad Sliding Door",
     "Folding Door",
     "Door + Sidelight",
     "Window + Sidelight",
