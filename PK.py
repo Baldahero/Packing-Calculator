@@ -32,16 +32,22 @@ HEAVY_GLAZING_TYPES = {
     "double sliding door",
     "triple sliding door",
     "quad sliding door",
-    "folding door",
+    "double folding door",
+    "triple folding door",
+    "quad folding door",
+    "5-leaf folding door",
 }
 
-# Number of parts for split sliding doors
+# Number of parts for split sliding/folding doors
 SLIDING_PARTS = {
     "sliding door": 1,
     "double sliding door": 2,
     "triple sliding door": 3,
     "quad sliding door": 4,
-    "folding door": 1,
+    "double folding door": 2,
+    "triple folding door": 3,
+    "quad folding door": 4,
+    "5-leaf folding door": 5,
 }
 
 # Facades: glass always packed separately regardless of height/weight
@@ -252,7 +258,6 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Unit weight (kg)": float(construction.weight_kg),
         "Glass weight (kg)": stored_glass_weight,
         "Glass parts": int(glass_parts),
-        "Glass weight per part (kg)": float(glass_weight_per_part),
         "Glass pallet width (mm)": float(glass_pallet_width),
         "Glass mode": mode,
         "Rotated": "YES" if construction.rotated else "NO",
@@ -514,7 +519,7 @@ def make_import_template() -> bytes:
         cell.alignment = Alignment(horizontal="center")
 
     dv_type = DataValidation(type="list",
-        formula1='"Door,Window,Fixed Window,Sliding Door,Double Sliding Door,Triple Sliding Door,Quad Sliding Door,Folding Door,Door + Sidelight,Window + Sidelight"',
+        formula1='"Door,Window,Fixed Window,Sliding Door,Double Sliding Door,Triple Sliding Door,Quad Sliding Door,Double Folding Door,Triple Folding Door,Quad Folding Door,5-leaf Folding Door,Door + Sidelight,Window + Sidelight"',
         showDropDown=False)
     ws.add_data_validation(dv_type)
     dv_type.sqref = "B2:B1000"
@@ -595,7 +600,10 @@ TYPES = [
     "Double Sliding Door",
     "Triple Sliding Door",
     "Quad Sliding Door",
-    "Folding Door",
+    "Double Folding Door",
+    "Triple Folding Door",
+    "Quad Folding Door",
+    "5-leaf Folding Door",
     "Door + Sidelight",
     "Window + Sidelight",
     "Facade",
@@ -881,7 +889,7 @@ st.caption("Fill in the template and upload it to calculate packing automaticall
 st.download_button(
     label="⬇️ Download input template",
     data=make_import_template(),
-    file_name="Import_template.xlsx",
+    file_name="import_template.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
