@@ -145,9 +145,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     is_facade = construction.item_type.lower() in FACADE_TYPES
     parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
 
-    # For multi-part sliding doors, pallet width is based on width per part
-    if parts > 1:
-        real_width = real_pallet_width(calc_width / parts, calc_height)
+    # For multi-part sliding doors, pallet width is full width (not per part)
+    # Only glass weight is split by number of parts
 
     mode = construction.glass_mode
 
@@ -870,7 +869,7 @@ st.caption("Fill in the template and upload it to calculate packing automaticall
 st.download_button(
     label="⬇️ Download input template",
     data=make_import_template(),
-    file_name="import_template.xlsx",
+    file_name="Import_template.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
