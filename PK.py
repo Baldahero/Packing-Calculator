@@ -163,7 +163,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             "Width (mm)": float(construction.width_mm),
             "Height (mm)": float(construction.height_mm),
             "Qty": int(construction.qty),
-            "Profiles weight (kg)": float(construction.weight_kg),
+            "Unit weight (kg)": float(construction.weight_kg),
             "Glass weight (kg)": float(construction.glass_weight_kg),
             "Glass mode": mode,
             "Rotated": "YES" if construction.rotated else "NO",
