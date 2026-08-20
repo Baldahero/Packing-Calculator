@@ -246,8 +246,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     glass_parts = parts if parts > 1 else 1
     glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
 
-    # Glass pallet width = width per part for multi-part sliding doors
-    glass_pallet_width = real_pallet_width(calc_width / parts, calc_height) if parts > 1 else int(real_width)
+    # Glass pallet width = width per part for multi-part sliding/folding doors
+    glass_pallet_width = round(real_pallet_width(calc_width / parts, calc_height)) if parts > 1 else int(real_width)
 
     return {
         "Item": construction.item_name,
@@ -734,6 +734,7 @@ with right:
         )
         _psdf, _, _, _ = build_pallet_outputs(stats_df)
         est_pallets = int(len(_psdf))
+
         s1, s2 = st.columns(2)
         s1.metric("Total units", total_units)
         s2.metric("Total weight", f"{total_weight:,.0f} kg")
