@@ -144,6 +144,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
     is_facade = construction.item_type.lower() in FACADE_TYPES
     parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
+
+    # For multi-part sliding doors, pallet width is based on width per part
+    if parts > 1:
+        real_width = real_pallet_width(calc_width / parts, calc_height)
+
     mode = construction.glass_mode
 
     if calc_height > MAX_CONSTRUCTION_HEIGHT:
