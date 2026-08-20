@@ -376,7 +376,7 @@ def build_pallet_outputs(results_df: pd.DataFrame):
     return pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm
 
 
-def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: int, glass_cost: float, glass_ldm: float, total_glass_weight: float) -> pd.DataFrame:
+def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: int, glass_cost: float, glass_ldm: float, total_glass_weight: float, glass_pallet_width: float = 1200) -> pd.DataFrame:
     """Append glass box rows to pallet summary."""
     if glass_boxes <= 0:
         return pallet_summary_df
@@ -388,7 +388,7 @@ def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: in
             "Pallet weight (kg)": round(total_glass_weight / glass_boxes, 2),
             "Constructions count": "-",
             "Units count": "-",
-            "Pallet width (mm)": 1200,
+            "Pallet width (mm)": round(glass_pallet_width, 1),
             "Pallet price (EUR)": glass_cost / glass_boxes,
             "Pallet LDM": round(glass_ldm / glass_boxes, 3),
             "Note": "GLASS BOX",
@@ -424,9 +424,14 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
 
     glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
     glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
-    glass_ldm = ldm_from_width(GLASS_PALLET_WIDTH_MM, glass_boxes)
 
-    return glass_boxes, total_glass_weight, glass_cost, glass_ldm
+    # Glass pallet width = max pallet width of constructions with separate glass
+    glass_pallet_width = float(
+        pd.to_numeric(separate_glass_df["Pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+    )
+    glass_ldm = ldm_from_width(glass_pallet_width, glass_boxes)
+
+    return glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width
 
 
 # ============================================================
@@ -671,7 +676,6 @@ with right:
         )
         _psdf, _, _, _ = build_pallet_outputs(stats_df)
         est_pallets = int(len(_psdf))
-
         s1, s2 = st.columns(2)
         s1.metric("Total units", total_units)
         s2.metric("Total weight", f"{total_weight:,.0f} kg")
@@ -742,13 +746,13 @@ if st.session_state.results:
             st.rerun()
 
     pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm = build_pallet_outputs(results_df)
-    glass_boxes, total_glass_weight, glass_cost, glass_ldm = calculate_glass_boxes(results_df)
+    glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width = calculate_glass_boxes(results_df)
     total_packaging_cost = total_pallet_cost + glass_cost
     total_ldm = total_pallet_ldm + glass_ldm
 
     # Add glass boxes to pallet summary
     pallet_summary_with_glass_df = add_glass_to_pallet_summary(
-        pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight
+        pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight, glass_pallet_width
     )
 
     kpi_df = pd.DataFrame(
@@ -827,7 +831,7 @@ st.caption("Fill in the template and upload it to calculate packing automaticall
 st.download_button(
     label="⬇️ Download input template",
     data=make_import_template(),
-    file_name="import_template.xlsx",
+    file_name="constructions_template.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
