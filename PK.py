@@ -236,9 +236,12 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     if construction.rotated and "rotated" not in notes.lower():
         notes += "; packed rotated (width↔height swapped)"
 
-    # For multi-part sliding doors: split glass weight by number of parts
-    glass_parts = parts if (packed_as == "SPLIT" and parts > 1) else 1
+    # For multi-part sliding doors: glass weight is total (not split), pallet width is per part
+    glass_parts = parts if parts > 1 else 1
     glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
+
+    # Glass pallet width = width per part for multi-part sliding doors
+    glass_pallet_width = real_pallet_width(calc_width / parts, calc_height) if parts > 1 else int(real_width)
 
     return {
         "Item": construction.item_name,
@@ -250,6 +253,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         "Glass weight (kg)": stored_glass_weight,
         "Glass parts": int(glass_parts),
         "Glass weight per part (kg)": float(glass_weight_per_part),
+        "Glass pallet width (mm)": float(glass_pallet_width),
         "Glass mode": mode,
         "Rotated": "YES" if construction.rotated else "NO",
         "Packed as": packed_as,
@@ -460,10 +464,18 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
     glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
 
-    # Glass pallet width = max pallet width of constructions with separate glass
-    glass_pallet_width = float(
-        pd.to_numeric(separate_glass_df["Pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
-    )
+    # Glass pallet width = max glass pallet width among constructions with separate glass
+    if "Glass pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Glass pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    elif "Pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    else:
+        glass_pallet_width = float(GLASS_PALLET_WIDTH_MM)
+
     glass_ldm = ldm_from_width(glass_pallet_width, glass_boxes)
 
     return glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width
