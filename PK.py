@@ -1,0 +1,1214 @@
+import math
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Dict, List
+
+import pandas as pd
+import streamlit as st
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+MAX_GLAZED_HEIGHT = 2700
+MAX_PACKING_HEIGHT = 2700
+MAX_CONSTRUCTION_HEIGHT = 6600  # absolute max pallet size
+MAX_PALLET_WEIGHT_KG = 1000.0
+MAX_ITEMS_PER_PALLET = 6
+MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
+
+MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
+MAX_SLIDING_WIDTH = 5960       # max width for fully assembled sliding door; above this → SPLIT
+SPLIT_PALLET_WIDTH = 5960 + 200  # pallet width for split sliding door
+GLASS_BOX_PRICE_EUR = 180.0
+GLASS_BOX_MAX_WEIGHT_KG = 1000.0
+GLASS_PALLET_WIDTH_MM = 1200
+TRUCK_WIDTH_M = 2.0
+
+# ============================================================
+# FREIGHT RATES — IRELAND (Naujos +10%)
+# Standard: all constructions <= 2700mm height
+# Mega: at least one construction > 2700mm height
+# ============================================================
+IRELAND_RATES = {
+    #  LDM: (Standard, Mega)
+    0.4:  (407,    462),
+    0.8:  (577.5,  633),
+    1.2:  (693,    715),
+    1.6:  (858,    924),
+    2.0:  (1039.5, 1067),
+    2.4:  (1188,   1188),
+    2.8:  (1386,   1386),
+    3.2:  (1595,   1595),
+    3.6:  (1826,   1848),
+    4.0:  (1963.5, 1964),
+    4.4:  (2167,   2167),
+    4.8:  (2365,   2426),
+    5.2:  (2563,   2596),
+    5.6:  (2761,   2805),
+    6.0:  (2959,   3003),
+    6.4:  (3190,   3179),
+    6.8:  (3377,   3399),
+    7.2:  (3608,   3619),
+    7.6:  (3773,   3839),
+    8.0:  (3982,   3982),
+    8.4:  (4092,   4147),
+    8.8:  (4273.5, 4334),
+    9.2:  (4411,   4444),
+    9.6:  (4620,   4675),
+    10.0: (4675,   4906),
+    10.4: (4735.5, 4967),
+    10.8: (4906,   5137),
+    11.2: (5082,   5313),
+}
+IRELAND_FTL = (5170, 5500)  # (Standard, Mega)
+
+
+def get_ireland_freight(total_ldm: float, is_mega: bool) -> float:
+    """Get Ireland freight cost based on LDM and trailer type."""
+    ldm_keys = sorted(IRELAND_RATES.keys())
+    # Round up to nearest LDM tier
+    for key in ldm_keys:
+        if total_ldm <= key:
+            std, mega = IRELAND_RATES[key]
+            return mega if is_mega else std
+    # FTL
+    std, mega = IRELAND_FTL
+    return mega if is_mega else std
+
+# Types with special glazing rule: glazed only if height <= 2700 and weight <= 1000 kg
+# Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
+HEAVY_GLAZING_TYPES = {
+    "sliding door",
+    "double sliding door",
+    "triple sliding door",
+    "quad sliding door",
+    "double folding door",
+    "triple folding door",
+    "quad folding door",
+    "5-leaf folding door",
+}
+
+# Number of parts for split sliding/folding doors
+SLIDING_PARTS = {
+    "sliding door": 1,
+    "double sliding door": 2,
+    "triple sliding door": 3,
+    "quad sliding door": 4,
+    "double folding door": 2,
+    "triple folding door": 3,
+    "quad folding door": 4,
+    "5-leaf folding door": 5,
+}
+
+# Facades: glass always packed separately regardless of height/weight
+FACADE_TYPES = {
+    "facade",
+}
+
+
+
+# ============================================================
+# DATA MODEL
+# ============================================================
+@dataclass
+class Construction:
+    item_name: str
+    item_type: str
+    width_mm: float
+    height_mm: float
+    qty: int
+    weight_kg: float
+    glass_mode: str = "Glazed"  # "Glazed" | "Unglazed" | "Without glass"
+    glass_weight_kg: float = 0.0
+    rotated: bool = False  # if True, width and height are swapped for packing
+
+
+# ============================================================
+# PACKING RULES
+# ============================================================
+def min_pallet_width_by_height(height_mm: float) -> int:
+    if height_mm <= 1000:
+        return 400
+    if height_mm <= 2000:
+        return 800
+    if height_mm <= MAX_PACKING_HEIGHT:
+        return 1200
+    return 0
+
+
+def round_up_pallet_width(size_mm: float) -> int:
+    if size_mm <= 1000:
+        return 1000
+    if size_mm <= 1500:
+        return 1500
+    if size_mm <= 2500:
+        return 2500
+    if size_mm <= 3500:
+        return 3500
+    if size_mm <= 5000:
+        return 5000
+    if size_mm <= 6000:
+        return 6000
+    if size_mm <= 6600:
+        return 6600
+    return int(math.ceil(size_mm / 1000.0) * 1000)
+
+
+def real_pallet_width(width_mm: float, height_mm: float) -> float:
+    """Physical pallet width based on construction width.
+    < 3000mm: width + 100, >= 3000mm: width + 200.
+    Height does not affect pallet width (constructions are packed diagonally when height > 2700mm,
+    but the pallet footprint is still determined by width).
+    """
+    return width_mm + 200 if width_mm >= 3000 else width_mm + 100
+
+
+def pallet_price_eur(width_mm: float) -> float:
+    w = float(width_mm or 0)
+    if w <= 1000:
+        return 36.0
+    if w <= 1500:
+        return 52.0
+    if w <= 2500:
+        return 80.0
+    if w <= 3500:
+        return 95.0
+    if w <= 5000:
+        return 111.0
+    if w <= 6000:
+        return 145.0
+    if w <= 6600:
+        return 145.0
+    return 145.0
+
+
+def ldm_from_width(width_mm: float, count: int = 1) -> float:
+    return (float(width_mm) * float(count)) / TRUCK_WIDTH_M / 1000.0
+
+
+def calculate_construction(construction: Construction) -> Dict[str, object]:
+    # If rotated, swap width and height for all packing calculations
+    if construction.rotated:
+        calc_width  = construction.height_mm
+        calc_height = construction.width_mm
+    else:
+        calc_width  = construction.width_mm
+        calc_height = construction.height_mm
+
+    real_width = real_pallet_width(calc_width, calc_height)
+    packed_sideways = calc_height > MAX_GLAZED_HEIGHT
+    is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
+    is_facade = construction.item_type.lower() in FACADE_TYPES
+    parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
+
+    # For multi-part sliding doors, pallet width is full width (not per part)
+    # Only glass weight is split by number of parts
+
+    mode = construction.glass_mode
+
+    if calc_height > MAX_CONSTRUCTION_HEIGHT:
+        return {
+            "Item": construction.item_name,
+            "Type": construction.item_type,
+            "Width (mm)": float(construction.width_mm),
+            "Height (mm)": float(construction.height_mm),
+            "Qty": int(construction.qty),
+            "Unit weight (kg)": float(construction.weight_kg),
+            "Glass weight (kg)": float(construction.glass_weight_kg),
+            "Glass mode": mode,
+            "Rotated": "YES" if construction.rotated else "NO",
+            "Packed as": "NOT POSSIBLE",
+            "Glass separate": "N/A",
+            "Packed sideways": "N/A",
+            "Max per pallet": "N/A",
+            "Pallet width (mm)": "N/A",
+            "Notes": "Construction size exceeds current pallet pricing ranges",
+        }
+
+    packed_as = "UNGLAZED"
+    glass_separate = "NO"
+    notes = "Packed without glass"
+
+    if mode == "Without glass":
+        # glass is not ours — no glass box, just pack the frame
+        packed_as = "UNGLAZED"
+        glass_separate = "NO"
+        notes = "Without glass — frame only"
+
+    elif mode == "Unglazed":
+        # glass travels separately → glass box needed
+        packed_as = "UNGLAZED"
+        glass_separate = "YES"
+        notes = "Glass packed separately"
+        if construction.item_type.lower() == "sliding door" and construction.width_mm > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif packed_sideways:
+            notes = "Glass packed separately; construction packed sideways"
+
+    elif mode == "Glazed":
+        # glass travels with frame — check if any rule forces separation
+        if is_facade:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Facade — glass always packed separately"
+        elif construction.item_type.lower() == "sliding door" and calc_width > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif construction.item_type.lower() in ("double sliding door", "triple sliding door", "quad sliding door") and calc_width > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled ({parts} parts); glass split into {parts} pieces; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif packed_sideways:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Glass must be packed separately; construction packed sideways"
+        elif is_heavy_type and construction.weight_kg > MAX_PALLET_WEIGHT_KG:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass; glass packed separately"
+        elif is_heavy_type and calc_width > MAX_GLAZED_WIDTH_HEAVY:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = f"Width exceeds {MAX_GLAZED_WIDTH_HEAVY} mm — glass packed separately"
+        else:
+            packed_as = "GLAZED"
+            notes = "Can be packed with glass"
+
+    if mode != "Glazed" and packed_sideways and glass_separate == "NO":
+        notes += "; construction packed sideways"
+
+    max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
+    if packed_sideways:
+        max_per_pallet = 1
+
+    # Always store glass weight for visibility; it's used for pallet weight when glazed together
+    stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
+
+    if construction.rotated and "rotated" not in notes.lower():
+        notes += "; packed rotated (width↔height swapped)"
+
+    # For multi-part sliding doors: glass weight is total (not split), pallet width is per part
+    glass_parts = parts if parts > 1 else 1
+    glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
+
+    # Glass pallet width = width per part for multi-part sliding/folding doors
+    glass_pallet_width = round(real_pallet_width(calc_width / parts, calc_height)) if parts > 1 else int(real_width)
+
+    return {
+        "Item": construction.item_name,
+        "Type": construction.item_type,
+        "Width (mm)": float(construction.width_mm),
+        "Height (mm)": float(construction.height_mm),
+        "Qty": int(construction.qty),
+        "Unit weight (kg)": float(construction.weight_kg),
+        "Glass weight (kg)": stored_glass_weight,
+        "Glass parts": int(glass_parts),
+        "Glass pallet width (mm)": float(glass_pallet_width),
+        "Glass mode": mode,
+        "Rotated": "YES" if construction.rotated else "NO",
+        "Packed as": packed_as,
+        "Glass separate": glass_separate,
+        "Packed sideways": "YES" if packed_sideways else "NO",
+        "Max per pallet": int(max_per_pallet),
+        "Pallet width (mm)": int(real_width),
+        "Notes": notes,
+    }
+
+
+# ============================================================
+# PALLET PACKING
+# ============================================================
+def expand_by_qty(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in df.iterrows():
+        qty = int(row["Qty"])
+        for unit_idx in range(1, qty + 1):
+            rr = row.copy()
+            rr["Qty"] = 1
+            rr["Unit idx"] = unit_idx
+            rows.append(rr)
+    return pd.DataFrame(rows)
+
+
+def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
+    if units.empty:
+        return []
+
+    u = units.copy()
+    u["Unit weight (kg)"] = pd.to_numeric(u["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    u["Glass weight (kg)"] = pd.to_numeric(u.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+
+    # Total weight on pallet = frame + glass if glass is packed together, else frame only
+    u["_total_weight"] = u.apply(
+        lambda r: r["Unit weight (kg)"] + r["Glass weight (kg)"]
+        if r.get("Glass separate", "NO") == "NO" and r.get("Glass mode", "Without glass") == "Glazed"
+        else r["Unit weight (kg)"],
+        axis=1,
+    )
+
+    u = u.sort_values("_total_weight", ascending=False).reset_index(drop=True)
+
+    pallets: List[Dict[str, object]] = []
+
+    for _, item in u.iterrows():
+        w = float(item["_total_weight"])
+        try:
+            item_max = int(item["Max per pallet"])
+        except (KeyError, ValueError, TypeError):
+            item_max = MAX_ITEMS_PER_PALLET
+        placed = False
+
+        for pallet in pallets:
+            pallet_max = min(pallet["max_per_pallet"], item_max)
+            if (
+                pallet["weight_kg"] + w <= MAX_PALLET_WEIGHT_KG
+                and pallet["items_count"] + 1 <= pallet_max
+            ):
+                pallet["weight_kg"] += w
+                pallet["items_count"] += 1
+                pallet["max_per_pallet"] = pallet_max
+                pallet["items"].append(item)
+                placed = True
+                break
+
+        if not placed:
+            pallets.append(
+                {
+                    "weight_kg": w,
+                    "items_count": 1,
+                    "max_per_pallet": item_max,
+                    "items": [item],
+                }
+            )
+
+    return pallets
+
+
+def _get_pallet_width(item) -> float:
+    """Get pallet width from item, handling different column name versions."""
+    for col in ("Pallet width (mm)", "Real pallet width (mm)"):
+        try:
+            v = item[col]
+            f = float(v)
+            if not math.isnan(f):
+                return f
+        except (KeyError, ValueError, TypeError):
+            pass
+    try:
+        return real_pallet_width(float(item["Width (mm)"]), float(item["Height (mm)"]))
+    except Exception:
+        return 1200.0
+
+
+def build_pallet_outputs(results_df: pd.DataFrame):
+    valid_df = results_df[~results_df["Packed as"].isin(["NOT POSSIBLE"])].copy()
+    if valid_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0.0, 0.0
+
+    units = expand_by_qty(valid_df)
+    pallets = pack_mixed(units)
+
+    pallet_summary_rows = []
+    plan_rows = []
+    total_pallet_cost = 0.0
+    total_pallet_ldm = 0.0
+
+    for i, pallet in enumerate(pallets, start=1):
+        items_df = pd.DataFrame(pallet["items"])
+
+        pallet_real_width = float(items_df.apply(_get_pallet_width, axis=1).max())
+        pallet_req_width = round_up_pallet_width(pallet_real_width)
+        pallet_price = pallet_price_eur(pallet_req_width)
+        pallet_ldm = ldm_from_width(pallet_real_width, 1)
+
+        total_pallet_cost += pallet_price
+        total_pallet_ldm += pallet_ldm
+
+        pallet_summary_rows.append(
+            {
+                "Pallet no": i,
+                "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),  # frame + glass if glazed together
+                "Constructions count": int(items_df["Item"].nunique()),
+                "Units count": int(len(items_df)),
+                "Pallet width (mm)": round(pallet_real_width, 1),
+                "Pallet price (EUR)": pallet_price,
+                "Pallet LDM": round(pallet_ldm, 3),
+            }
+        )
+
+        for _, item in items_df.iterrows():
+            plan_rows.append(
+                {
+                    "Pallet no": i,
+                    "Item": item["Item"],
+                    "Type": item["Type"],
+                    "Width (mm)": item["Width (mm)"],
+                    "Height (mm)": item["Height (mm)"],
+                    "Unit weight (kg)": item["Unit weight (kg)"],
+                    "Packed as": item["Packed as"],
+                    "Glass separate": item["Glass separate"],
+                    "Packed sideways": item["Packed sideways"],
+                    "Pallet width (mm)": _get_pallet_width(item),
+                    "Unit idx": item["Unit idx"],
+                }
+            )
+
+    pallet_summary_df = pd.DataFrame(pallet_summary_rows)
+    plan_df = pd.DataFrame(plan_rows)
+    return pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm
+
+
+def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: int, glass_cost: float, glass_ldm: float, total_glass_weight: float, glass_pallet_width: float = 1200) -> pd.DataFrame:
+    """Append glass box rows to pallet summary."""
+    if glass_boxes <= 0:
+        return pallet_summary_df
+    last_pallet_no = int(pallet_summary_df["Pallet no"].max()) if not pallet_summary_df.empty else 0
+    glass_rows = []
+    for i in range(glass_boxes):
+        glass_rows.append({
+            "Pallet no": last_pallet_no + i + 1,
+            "Pallet weight (kg)": round(total_glass_weight / glass_boxes, 2),
+            "Constructions count": "-",
+            "Units count": "-",
+            "Pallet width (mm)": round(glass_pallet_width, 1),
+            "Pallet price (EUR)": glass_cost / glass_boxes,
+            "Pallet LDM": round(glass_ldm / glass_boxes, 3),
+            "Note": "GLASS BOX",
+        })
+    glass_df = pd.DataFrame(glass_rows)
+    return pd.concat([pallet_summary_df, glass_df], ignore_index=True)
+
+# ============================================================
+# GLASS BOXES
+# ============================================================
+def calculate_glass_boxes(results_df: pd.DataFrame):
+    if results_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
+    if separate_glass_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    # Use glass weight per part if available (for split sliding doors)
+    if "Glass weight per part (kg)" in separate_glass_df.columns and "Glass parts" in separate_glass_df.columns:
+        glass_w = pd.to_numeric(separate_glass_df["Glass weight per part (kg)"], errors="coerce").fillna(0.0)
+        glass_parts = pd.to_numeric(separate_glass_df["Glass parts"], errors="coerce").fillna(1.0)
+    else:
+        glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+        glass_parts = pd.Series([1.0] * len(separate_glass_df), index=separate_glass_df.index)
+
+    unit_w = pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    effective_glass_w = glass_w.where(glass_w > 0, unit_w)
+
+    total_glass_weight = float(
+        (
+            effective_glass_w
+            * glass_parts
+            * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
+        ).sum()
+    )
+
+    if total_glass_weight <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
+    glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
+
+    # Glass pallet width = max glass pallet width among constructions with separate glass
+    if "Glass pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Glass pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    elif "Pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    else:
+        glass_pallet_width = float(GLASS_PALLET_WIDTH_MM)
+
+    glass_ldm = ldm_from_width(glass_pallet_width, glass_boxes)
+
+    return glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+def make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        kpi_df.to_excel(writer, sheet_name="Summary", index=False)
+        results_df.to_excel(writer, sheet_name="Constructions", index=False)
+        pallet_summary_df.to_excel(writer, sheet_name="Pallet Summary", index=False)
+        plan_df.to_excel(writer, sheet_name="Packing Plan", index=False)
+    return output.getvalue()
+
+
+def make_import_template() -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Constructions"
+    headers = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+               "Unit weight (kg)", "Glass weight (kg)", "Glass mode", "Rotated"]
+    ws.append(headers)
+
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    dv_type = DataValidation(type="list",
+        formula1='"Door,Window,Fixed Window,Sliding Door,Double Sliding Door,Triple Sliding Door,Quad Sliding Door,Double Folding Door,Triple Folding Door,Quad Folding Door,5-leaf Folding Door,Door + Sidelight,Window + Sidelight"',
+        showDropDown=False)
+    ws.add_data_validation(dv_type)
+    dv_type.sqref = "B2:B1000"
+
+    dv_glass = DataValidation(type="list",
+        formula1='"Glazed,Unglazed,Without glass"', showDropDown=False)
+    ws.add_data_validation(dv_glass)
+    dv_glass.sqref = "H2:H1000"
+
+    dv_rot = DataValidation(type="list", formula1='"NO,YES"', showDropDown=False)
+    ws.add_data_validation(dv_rot)
+    dv_rot.sqref = "I2:I1000"
+
+    for col, width in zip("ABCDEFGHI", [22, 20, 14, 14, 8, 18, 18, 16, 10]):
+        ws.column_dimensions[col].width = width
+
+    ws_f = wb.create_sheet("Facades")
+    facade_headers = ["Item", "Length (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"]
+    ws_f.append(facade_headers)
+    facade_fill = PatternFill("solid", fgColor="375623")
+    for cell in ws_f[1]:
+        cell.fill = facade_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    for col, width in zip("ABCDE", [22, 14, 8, 18, 18]):
+        ws_f.column_dimensions[col].width = width
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ============================================================
+# SESSION HELPERS
+# ============================================================
+def add_result_to_session(result: Dict[str, object]) -> None:
+    if "results" not in st.session_state:
+        st.session_state.results = []
+    st.session_state.results.append(result)
+
+
+def clear_results() -> None:
+    st.session_state.results = []
+
+
+# ============================================================
+# UI
+# ============================================================
+st.set_page_config(page_title="Packing Calculator", layout="wide")
+
+header_left, header_right = st.columns([1, 4])
+with header_left:
+    try:
+        st.image("nordan_logo1.png", use_container_width=True)
+    except Exception:
+        st.markdown("**NorDan**")
+
+with header_right:
+    st.title("Packing Calculator Pre-Alfa Version")
+    st.caption("Manual packing calculation for constructions")
+
+# with st.expander("Rules used", expanded=False):
+#     st.markdown(...)  # rules hidden — uncomment to restore
+
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "project_name" not in st.session_state:
+    st.session_state.project_name = "packing_calculation"
+if "edit_idx" not in st.session_state:
+    st.session_state.edit_idx = None
+
+TYPES = [
+    "Door",
+    "Window",
+    "Fixed Window",
+    "Sliding Door",
+    "Double Sliding Door",
+    "Triple Sliding Door",
+    "Quad Sliding Door",
+    "Double Folding Door",
+    "Triple Folding Door",
+    "Quad Folding Door",
+    "5-leaf Folding Door",
+    "Door + Sidelight",
+    "Window + Sidelight",
+    "Facade",
+]
+
+if "selected_type" not in st.session_state:
+    st.session_state.selected_type = TYPES[0]
+
+left, right = st.columns([1, 1])
+
+with left:
+    # Prefill values from edit state if editing
+    _e = st.session_state.edit_idx
+    if _e is not None:
+        _r = st.session_state.results[_e]
+        _def_name     = _r.get("Item", "...")
+        _def_type     = _r.get("Type", TYPES[0])
+        _def_width    = max(1.0, float(_r.get("Width (mm)", 1000.0) or 1000.0))
+        _def_height   = max(1.0, float(_r.get("Height (mm)", 1000.0) or 1000.0))
+        _def_qty      = max(1, int(_r.get("Qty", 1) or 1))
+        _def_weight   = float(_r.get("Unit weight (kg)", 0.0) or 0.0)
+        _def_mode     = _r.get("Glass mode", "Glazed")
+        _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0) or 0.0)
+        _def_rotated  = str(_r.get("Rotated", "NO")).strip().upper() == "YES"
+        _title = f"✏️ Edit construction: {_def_name}"
+    else:
+        _def_name, _def_type, _def_width, _def_height = "...", TYPES[0], 1000.0, 1000.0
+        _def_qty, _def_weight, _def_mode, _def_glass_w, _def_rotated = 1, 0.0, "Glazed", 0.0, False
+        _title = "Add construction"
+
+    # Detect if facade is selected (for field visibility)
+    _current_type = st.session_state.get("selected_type", _def_type)
+
+    st.subheader(_title)
+
+    # Type selector outside form so facade detection works immediately
+    selected_type_ui = st.selectbox(
+        "Type",
+        TYPES,
+        index=TYPES.index(_current_type) if _current_type in TYPES else 0,
+        key="selected_type",
+    )
+
+    with st.form(f"packing_form_{_e if _e is not None else 'new'}"):
+        item_name = st.text_input("Item name", value=_def_name)
+        item_type = selected_type_ui
+        is_facade_form = (selected_type_ui == "Facade")
+
+        if is_facade_form:
+            facade_length = st.number_input("Length (mm)", min_value=1.0, value=_def_width if _def_width > 1.0 else 1000.0, step=1.0)
+            width_mm  = facade_length
+            height_mm = 1.0
+        else:
+            width_mm  = st.number_input("Width (mm)",  min_value=1.0, value=_def_width,  step=1.0)
+            height_mm = st.number_input("Height (mm)", min_value=1.0, value=_def_height, step=1.0)
+        qty       = st.number_input("Quantity",    min_value=1,    value=_def_qty,    step=1)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=_def_weight, step=0.01)
+
+        glass_mode = st.selectbox("Glass", ["Glazed", "Unglazed", "Without glass"],
+            index=["Glazed", "Unglazed", "Without glass"].index(_def_mode) if _def_mode in ["Glazed", "Unglazed", "Without glass"] else 0,
+            help="Glazed = glass travels with frame | Unglazed = glass goes separately (glass box) | Without glass = no glass at all",
+        )
+
+        glass_weight_kg = st.number_input(
+            "Glass weight (kg)",
+            min_value=0.0, value=_def_glass_w, step=0.01,
+            help="Weight of glass only — required when glass is packed separately",
+        )
+
+        rotated = st.checkbox(
+            "Rotated (swap width ↔ height)",
+            value=_def_rotated,
+            help="Use when construction is packed rotated — width and height are swapped for packing calculations. Allows glazed packing if rotated height ≤ 2700mm.",
+        )
+
+        _btn_label = "Save changes" if _e is not None else "Calculate and add"
+        submitted = st.form_submit_button(_btn_label)
+
+        if submitted:
+            if weight_kg <= 0:
+                st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
+            elif glass_mode in ("Glazed", "Unglazed") and glass_weight_kg <= 0:
+                st.warning("⚠️ Glass weight is 0 — please enter the glass weight before adding.")
+            else:
+                construction = Construction(
+                    item_name=item_name.strip() or "Unnamed",
+                    item_type=item_type,
+                    width_mm=float(width_mm),
+                    height_mm=float(height_mm),
+                    qty=int(qty),
+                    weight_kg=float(weight_kg),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+                    rotated=rotated,
+                )
+                result = calculate_construction(construction)
+                if _e is not None:
+                    st.session_state.results[_e] = result
+                    st.session_state.edit_idx = None
+                    st.success(f"Updated: {result['Item']}")
+                else:
+                    add_result_to_session(result)
+                    st.success(f"Added: {result['Item']}")
+                st.rerun()
+
+with right:
+    # ---- Order statistics ----
+    if st.session_state.results:
+        st.subheader("Order statistics")
+        stats_df = pd.DataFrame(st.session_state.results)
+
+        total_units = int(pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0).sum())
+        total_weight = float(
+            (pd.to_numeric(stats_df["Unit weight (kg)"], errors="coerce").fillna(0)
+             * pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0)).sum()
+        )
+        glazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "GLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        unglazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "UNGLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        glass_separate_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Glass separate"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        sideways_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed sideways"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        _psdf, _, _, _ = build_pallet_outputs(stats_df)
+        est_pallets = int(len(_psdf))
+
+        s1, s2 = st.columns(2)
+        s1.metric("Total units", total_units)
+        s2.metric("Total weight", f"{total_weight:,.0f} kg")
+
+        s3, s4 = st.columns(2)
+        s3.metric("Glazed units", glazed_units)
+        s4.metric("Unglazed units", unglazed_units)
+
+        s5, s6 = st.columns(2)
+        s5.metric("Glass separate", glass_separate_units)
+        s6.metric("Packed sideways", sideways_units)
+
+        st.metric("Estimated pallets", est_pallets)
+
+        if sideways_units > 0:
+            st.warning(f"⚠️ {sideways_units} unit(s) will be packed sideways (height > 2700 mm)")
+        if glass_separate_units > 0:
+            st.info(f"ℹ️ {glass_separate_units} unit(s) require separate glass boxes")
+
+        st.divider()
+
+    # ---- Preview ----
+    st.subheader("Preview")
+
+    preview = Construction(
+        item_name=item_name.strip() or "Unnamed",
+        item_type=item_type,
+        width_mm=float(width_mm),
+        height_mm=float(height_mm),
+        qty=int(qty),
+        weight_kg=float(weight_kg),
+        glass_mode=glass_mode,
+        glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+        rotated=rotated,
+    )
+
+    preview_df = pd.DataFrame([calculate_construction(preview)])
+    st.dataframe(preview_df, use_container_width=True)
+
+st.divider()
+st.subheader("Constructions")
+
+if st.session_state.results:
+    results_df = pd.DataFrame(st.session_state.results)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("### Edit / Remove item")
+    col_sel, col_edit, col_del = st.columns([6, 1, 1])
+
+    with col_sel:
+        item_to_manage = st.selectbox(
+            "Select item",
+            options=list(range(len(results_df))),
+            format_func=lambda x: f"{results_df.iloc[x]['Item']} (row {x})",
+            label_visibility="collapsed",
+        )
+
+    with col_edit:
+        if st.button("✏️ Edit", use_container_width=True):
+            st.session_state.edit_idx = item_to_manage
+            st.rerun()
+
+    with col_del:
+        if st.button("🗑️ Delete", use_container_width=True):
+            if st.session_state.edit_idx == item_to_manage:
+                st.session_state.edit_idx = None
+            st.session_state.results.pop(item_to_manage)
+            st.rerun()
+
+    pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm = build_pallet_outputs(results_df)
+    glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width = calculate_glass_boxes(results_df)
+    total_packaging_cost = total_pallet_cost + glass_cost
+    total_ldm = total_pallet_ldm + glass_ldm
+
+    # Add glass boxes to pallet summary
+    pallet_summary_with_glass_df = add_glass_to_pallet_summary(
+        pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight, glass_pallet_width
+    )
+
+    # ---- Ireland freight ----
+    is_mega = any(
+        str(r.get("Packed sideways", "NO")).upper() == "YES"
+        for r in st.session_state.results
+    )
+    ireland_cost = get_ireland_freight(total_ldm, is_mega)
+    trailer_type = "Mega" if is_mega else "Standard"
+
+    kpi_df = pd.DataFrame(
+        [
+            {
+                "Product pallets count": int(len(pallet_summary_df)),
+                "Pallet cost (EUR)": round(total_pallet_cost, 2),
+                "Glass boxes count": int(glass_boxes),
+                "Glass weight total (kg)": round(total_glass_weight, 2),
+                "Glass cost (EUR)": round(glass_cost, 2),
+                "Total packaging cost (EUR)": round(total_packaging_cost, 2),
+                "Product LDM": round(total_pallet_ldm, 3),
+                "Glass LDM": round(glass_ldm, 3),
+                "Total LDM": round(total_ldm, 3),
+                "Trailer type": trailer_type,
+                "Ireland freight (EUR)": round(ireland_cost, 2),
+                "Total cost (EUR)": round(total_packaging_cost + ireland_cost, 2),
+            }
+        ]
+    )
+
+    st.subheader("Summary")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Product pallets", int(len(pallet_summary_df)))
+    c2.metric("Glass boxes", int(glass_boxes))
+    c3.metric("Packaging cost", f"{total_packaging_cost:.2f} EUR")
+    c4.metric("Total LDM", f"{total_ldm:.3f}")
+
+    st.subheader("🚛 Ireland freight estimate")
+    fr1, fr2, fr3 = st.columns(3)
+    fr1.metric("Trailer type", trailer_type)
+    fr2.metric("Freight cost", f"{ireland_cost:,.1f} EUR")
+    fr3.metric("Total (packaging + freight)", f"{total_packaging_cost + ireland_cost:,.1f} EUR")
+
+    st.dataframe(kpi_df, use_container_width=True)
+
+    if not pallet_summary_with_glass_df.empty:
+        st.subheader("Pallet summary")
+        st.dataframe(pallet_summary_with_glass_df, use_container_width=True)
+
+    if not plan_df.empty:
+        st.subheader("Packing plan")
+        st.dataframe(plan_df, use_container_width=True)
+
+    excel_data = make_excel_file(results_df, pallet_summary_with_glass_df, plan_df, kpi_df)
+
+    dl_col, clear_col = st.columns([3, 1])
+    with dl_col:
+        name_c1, name_c2 = st.columns([4, 1])
+        with name_c1:
+            new_name = st.text_input(
+                "Project name",
+                value=st.session_state.project_name,
+                key="project_name_input",
+                label_visibility="collapsed",
+                placeholder="Enter project name",
+            )
+        with name_c2:
+            if st.button("💾 Save name", use_container_width=True):
+                st.session_state.project_name = new_name.strip() or "packing_calculation"
+
+        st.download_button(
+            label="⬇️ Download Excel report",
+            data=excel_data,
+            file_name=f"{st.session_state.project_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with clear_col:
+        st.write("")
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Clear all", use_container_width=True):
+            clear_results()
+            st.session_state.edit_idx = None
+            st.rerun()
+
+else:
+    st.info("No constructions added yet.")
+
+st.divider()
+st.subheader("📂 Import from Excel")
+st.caption("Fill in the template and upload it to calculate packing automatically")
+
+st.download_button(
+    label="⬇️ Download input template",
+    data=make_import_template(),
+    file_name="import_template.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+uploaded = st.file_uploader("Upload filled template (.xlsx)", type=["xlsx"])
+
+if uploaded is not None:
+    try:
+        xl_sheets = pd.read_excel(uploaded, sheet_name=None)
+
+        def parse_num(val) -> float:
+            try:
+                s = str(val).strip()
+                if s in ("", "nan", "None"):
+                    return 0.0
+                s = s.replace("\xa0", "").replace(" ", "")
+                s = s.replace(",", ".")
+                return float(s)
+            except Exception:
+                return 0.0
+
+        # ---- Detect NorDan Calculation file (Sheet1 with horizontal layout) ----
+        is_nordan_calc = "Sheet1" in xl_sheets and "Constructions" not in xl_sheets
+
+        # ---- Detect Packing file (horizontal layout: rows=params, cols=constructions) ----
+        first_sheet = list(xl_sheets.values())[0]
+        first_col = first_sheet.iloc[:, 0].astype(str).str.strip().tolist() if not first_sheet.empty else []
+        is_packing_format = "Item number" in first_col and "Total width" in first_col
+
+        if is_packing_format:
+            df_raw = list(xl_sheets.values())[0]
+            df_raw = df_raw.set_index(df_raw.columns[0])
+
+            rows = []
+            for col in df_raw.columns:
+                val = lambda r: df_raw.loc[r, col] if r in df_raw.index else None
+                item_name = str(col).strip()
+                if not item_name or item_name in (" ", "nan"):
+                    continue
+
+                raw_type = str(val("Type") or "").strip()
+                item_type = raw_type if raw_type in TYPES else "Door"
+
+                raw_mode = str(val("Glass mode") or "").strip()
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                else:
+                    glass_w_check = parse_num(val("Glass"))
+                    glass_mode = "Glazed" if glass_w_check > 0 else "Without glass"
+
+                rotated = str(val("Rotated") or "NO").strip().upper() == "YES"
+
+                c = Construction(
+                    item_name=item_name,
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(val("Total width"))),
+                    height_mm=max(1.0, parse_num(val("Total height"))),
+                    qty=max(1, int(parse_num(val("Number") or 1))),
+                    weight_kg=parse_num(val("Profiles")),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(val("Glass")),
+                    rotated=rotated,
+                )
+                rows.append(calculate_construction(c))
+
+            st.success(f"✅ Found {len(rows)} construction(s) — ready to import")
+            preview_cols = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+                           "Unit weight (kg)", "Glass weight (kg)", "Glass mode"]
+            st.dataframe(pd.DataFrame(rows)[preview_cols], use_container_width=True)
+
+            imp_col1, imp_col2 = st.columns(2)
+            with imp_col1:
+                if st.button("⬆️ Import and replace all", use_container_width=True):
+                    st.session_state.results = rows
+                    st.session_state.edit_idx = None
+                    st.success(f"Imported {len(rows)} construction(s)!")
+                    st.rerun()
+            with imp_col2:
+                if st.button("➕ Import and add to existing", use_container_width=True):
+                    if "results" not in st.session_state:
+                        st.session_state.results = []
+                    st.session_state.results.extend(rows)
+                    st.success(f"Added {len(rows)} construction(s)!")
+                    st.rerun()
+
+        elif is_nordan_calc:
+            df_raw = pd.read_excel(uploaded, sheet_name="Sheet1", header=None)
+            # Find vertical table header row (has "Item number", "Production line", etc.)
+            header_row = None
+            for i, row in df_raw.iterrows():
+                vals = [str(v).strip() for v in row.values]
+                if "Item number" in vals and "Production line" in vals and "Total width" in vals:
+                    header_row = i
+                    break
+
+            if header_row is None:
+                st.error("❌ Could not find data table in Sheet1")
+            else:
+                df = pd.read_excel(uploaded, sheet_name="Sheet1", header=header_row)
+                df = df.dropna(subset=["Item number"])
+                df = df[df["Item number"].astype(str).str.strip().str.match(r'^\d+\.')]
+
+                def build_nordan_row(row):
+                    prod_line = str(row.get("Production line", "")).lower()
+                    if "unglazed" in prod_line:
+                        glass_mode = "Unglazed"
+                    elif "glazed" in prod_line:
+                        glass_mode = "Glazed"
+                    else:
+                        glass_mode = "Without glass"
+
+                    glass_w = parse_num(row.get("Glass", row.get("Glass weight (kg)", 0)))
+                    unit_w  = parse_num(row.get("Weight per item", row.get("Unit weight (kg)", 0)))
+                    width   = parse_num(row.get("Total width", row.get("Width (mm)", 1000)))
+                    height  = parse_num(row.get("Total height", row.get("Height (mm)", 1000)))
+
+                    c = Construction(
+                        item_name=str(row.get("Item number", "Unnamed")).strip(),
+                        item_type="Door",  # default — edit after import
+                        width_mm=max(1.0, width),
+                        height_mm=max(1.0, height),
+                        qty=max(1, int(parse_num(row.get("Number", row.get("Qty", 1))))),
+                        weight_kg=unit_w,
+                        glass_mode=glass_mode,
+                        glass_weight_kg=glass_w,
+                        rotated=False,
+                    )
+                    return calculate_construction(c)
+
+                st.success(f"✅ Found {len(df)} construction(s) from NorDan Calculation file")
+                st.caption("⚠️ Type set to 'Door' by default — please review via ✏️ Edit after import")
+                st.dataframe(df[["Item number", "Production line", "Total width", "Total height",
+                                 "Number", "Weight per item", "Glass"]].reset_index(drop=True),
+                             use_container_width=True)
+
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        st.session_state.results = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(st.session_state.results)} construction(s)!")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        new_rows = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.results.extend(new_rows)
+                        st.success(f"Added {len(new_rows)} construction(s)!")
+                        st.rerun()
+
+        else:
+            # ---- Standard template format ----
+            xl = xl_sheets.get("Constructions", pd.DataFrame())
+            template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
+            is_template = template_cols.issubset(set(xl.columns))
+
+            def build_row(row):
+                raw_mode = str(row.get("Glass mode", "")).strip()
+                # Map NorDan production line strings to glass mode
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                elif raw_mode in ("Glazed", "Unglazed", "Without glass"):
+                    glass_mode = raw_mode
+                else:
+                    glass_mode = "Glazed" if parse_num(row.get("Glass weight (kg)", 0)) > 0 else "Without glass"
+                rotated = str(row.get("Rotated", "NO")).strip().upper() == "YES"
+                item_type = str(row.get("Type", "")).strip()
+                if item_type not in ["Door", "Window", "Fixed Window", "Sliding Door",
+                                     "Folding Door", "Door + Sidelight", "Window + Sidelight"]:
+                    item_type = "Door"
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(row.get("Width (mm)", 1000))),
+                    height_mm=max(1.0, parse_num(row.get("Height (mm)", 1000))),
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=rotated,
+                )
+                return calculate_construction(c)
+
+            def build_facade_row(row):
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type="Facade",
+                    width_mm=max(1.0, parse_num(row.get("Length (mm)", 1000))),
+                    height_mm=1.0,
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode="Glazed",
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=False,
+                )
+                return calculate_construction(c)
+
+            if is_template:
+                valid_const = xl[~xl["Item"].astype(str).str.strip().isin(["", "nan"])]
+                missing_type = valid_const[~valid_const["Type"].astype(str).str.strip().isin(
+                    ["Door","Window","Fixed Window","Sliding Door","Folding Door",
+                     "Door + Sidelight","Window + Sidelight"])]
+
+                xl_facade = xl_sheets.get("Facades", pd.DataFrame())
+                has_facades = not xl_facade.empty and "Item" in xl_facade.columns
+                valid_facades = xl_facade[~xl_facade["Item"].astype(str).str.strip().isin(
+                    ["", "nan"])] if has_facades else pd.DataFrame()
+
+                st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
+
+                col_prev1, col_prev2 = st.columns(2)
+                with col_prev1:
+                    st.caption("Constructions")
+                    st.dataframe(valid_const[["Item","Type","Width (mm)","Height (mm)","Qty","Glass mode"]],
+                                 use_container_width=True)
+                with col_prev2:
+                    if not valid_facades.empty:
+                        st.caption("Facades")
+                        st.dataframe(valid_facades, use_container_width=True)
+
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results = rows
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(rows)} item(s)!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results.extend(rows)
+                        st.success(f"Added {len(rows)} item(s) to existing list!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+            else:
+                st.error("❌ Unrecognised file format. Please use the NorDan Calculation file or the template.")
+
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
