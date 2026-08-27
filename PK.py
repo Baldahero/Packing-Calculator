@@ -489,11 +489,11 @@ def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: in
 # ============================================================
 def calculate_glass_boxes(results_df: pd.DataFrame):
     if results_df.empty:
-        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
+        return 0, 0.0, 0.0, 0.0
 
     separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
     if separate_glass_df.empty:
-        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
+        return 0, 0.0, 0.0, 0.0
 
     # Use glass weight per part if available (for split sliding doors)
     if "Glass weight per part (kg)" in separate_glass_df.columns and "Glass parts" in separate_glass_df.columns:
@@ -515,7 +515,7 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     )
 
     if total_glass_weight <= 0:
-        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
+        return 0, 0.0, 0.0, 0.0
 
     glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
     glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
@@ -865,6 +865,14 @@ if st.session_state.results:
         pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight, glass_pallet_width
     )
 
+    # ---- Ireland freight ----
+    is_mega = any(
+        str(r.get("Packed sideways", "NO")).upper() == "YES"
+        for r in st.session_state.results
+    )
+    ireland_cost = get_ireland_freight(total_ldm, is_mega)
+    trailer_type = "Mega" if is_mega else "Standard"
+
     kpi_df = pd.DataFrame(
         [
             {
@@ -890,14 +898,6 @@ if st.session_state.results:
     c2.metric("Glass boxes", int(glass_boxes))
     c3.metric("Packaging cost", f"{total_packaging_cost:.2f} EUR")
     c4.metric("Total LDM", f"{total_ldm:.3f}")
-
-    # ---- Ireland freight ----
-    is_mega = any(
-        str(r.get("Packed sideways", "NO")).upper() == "YES"
-        for r in st.session_state.results
-    )
-    ireland_cost = get_ireland_freight(total_ldm, is_mega)
-    trailer_type = "Mega" if is_mega else "Standard"
 
     st.subheader("🚛 Ireland freight estimate")
     fr1, fr2, fr3 = st.columns(3)
