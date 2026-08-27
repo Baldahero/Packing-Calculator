@@ -489,11 +489,11 @@ def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: in
 # ============================================================
 def calculate_glass_boxes(results_df: pd.DataFrame):
     if results_df.empty:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
     separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
     if separate_glass_df.empty:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
     # Use glass weight per part if available (for split sliding doors)
     if "Glass weight per part (kg)" in separate_glass_df.columns and "Glass parts" in separate_glass_df.columns:
@@ -515,7 +515,7 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     )
 
     if total_glass_weight <= 0:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
     glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
     glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
