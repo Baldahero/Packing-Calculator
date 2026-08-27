@@ -1,1343 +1,1214 @@
-from __future__ import annotations
+import math
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Dict, List
 
-import io
-import subprocess
-import sys
-from datetime import date, timedelta
-from html import escape
-from pathlib import Path
-
-# Auto-install reportlab if missing (needed on Streamlit Cloud)
-try:
-    import reportlab  # noqa: F401
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab", "-q"])
-
+import pandas as pd
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-from project_evaluator import (
-    PricingInput,
-    ProjectInput,
-    aggregate_pricing_estimates,
-    estimate_price,
-    evaluate_project,
-    get_pricing_options,
-    load_historical_projects,
-    load_pricing_matrix,
-)
+# ============================================================
+# SETTINGS
+# ============================================================
+MAX_GLAZED_HEIGHT = 2700
+MAX_PACKING_HEIGHT = 2700
+MAX_CONSTRUCTION_HEIGHT = 6600  # absolute max pallet size
+MAX_PALLET_WEIGHT_KG = 1000.0
+MAX_ITEMS_PER_PALLET = 6
+MAX_ITEMS_PER_PALLET_HEAVY = 2  # for sliding/folding types
+
+MAX_GLAZED_WIDTH_HEAVY = 4500  # max width for glazed sliding/folding doors
+MAX_SLIDING_WIDTH = 5960       # max width for fully assembled sliding door; above this → SPLIT
+SPLIT_PALLET_WIDTH = 5960 + 200  # pallet width for split sliding door
+GLASS_BOX_PRICE_EUR = 180.0
+GLASS_BOX_MAX_WEIGHT_KG = 1000.0
+GLASS_PALLET_WIDTH_MM = 1200
+TRUCK_WIDTH_M = 2.0
+
+# ============================================================
+# FREIGHT RATES — IRELAND (Naujos +10%)
+# Standard: all constructions <= 2700mm height
+# Mega: at least one construction > 2700mm height
+# ============================================================
+IRELAND_RATES = {
+    #  LDM: (Standard, Mega)
+    0.4:  (407,    462),
+    0.8:  (577.5,  633),
+    1.2:  (693,    715),
+    1.6:  (858,    924),
+    2.0:  (1039.5, 1067),
+    2.4:  (1188,   1188),
+    2.8:  (1386,   1386),
+    3.2:  (1595,   1595),
+    3.6:  (1826,   1848),
+    4.0:  (1963.5, 1964),
+    4.4:  (2167,   2167),
+    4.8:  (2365,   2426),
+    5.2:  (2563,   2596),
+    5.6:  (2761,   2805),
+    6.0:  (2959,   3003),
+    6.4:  (3190,   3179),
+    6.8:  (3377,   3399),
+    7.2:  (3608,   3619),
+    7.6:  (3773,   3839),
+    8.0:  (3982,   3982),
+    8.4:  (4092,   4147),
+    8.8:  (4273.5, 4334),
+    9.2:  (4411,   4444),
+    9.6:  (4620,   4675),
+    10.0: (4675,   4906),
+    10.4: (4735.5, 4967),
+    10.8: (4906,   5137),
+    11.2: (5082,   5313),
+}
+IRELAND_FTL = (5170, 5500)  # (Standard, Mega)
+
+
+def get_ireland_freight(total_ldm: float, is_mega: bool) -> float:
+    """Get Ireland freight cost based on LDM and trailer type."""
+    ldm_keys = sorted(IRELAND_RATES.keys())
+    # Round up to nearest LDM tier
+    for key in ldm_keys:
+        if total_ldm <= key:
+            std, mega = IRELAND_RATES[key]
+            return mega if is_mega else std
+    # FTL
+    std, mega = IRELAND_FTL
+    return mega if is_mega else std
+
+# Types with special glazing rule: glazed only if height <= 2700 and weight <= 1000 kg
+# Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
+HEAVY_GLAZING_TYPES = {
+    "sliding door",
+    "double sliding door",
+    "triple sliding door",
+    "quad sliding door",
+    "double folding door",
+    "triple folding door",
+    "quad folding door",
+    "5-leaf folding door",
+}
+
+# Number of parts for split sliding/folding doors
+SLIDING_PARTS = {
+    "sliding door": 1,
+    "double sliding door": 2,
+    "triple sliding door": 3,
+    "quad sliding door": 4,
+    "double folding door": 2,
+    "triple folding door": 3,
+    "quad folding door": 4,
+    "5-leaf folding door": 5,
+}
+
+# Facades: glass always packed separately regardless of height/weight
+FACADE_TYPES = {
+    "facade",
+}
+
+
 
-
-DATA_PATH = ROOT / "data" / "historical_projects.csv"
-PRICING_PATH = ROOT / "data" / "pricing_matrix.csv"
-PACKAGE_IDS_STATE_KEY = "element_package_ids"
-
-APP_CSS = """
-<style>
-:root {
-    --ink: #1a2420;
-    --muted: #6b7c75;
-    --line: #d4ddd8;
-    --surface: #ffffff;
-    --surface-soft: #f4f7f5;
-    --lime: #4a8c1c;
-    --cyan: #0e8f9c;
-    --coral: #d94f45;
-    --app-bg: #f0f4f2;
-    --sidebar-bg: #ffffff;
-    --input-bg: #ffffff;
-}
-
-.stApp {
-    background: var(--app-bg);
-    color: var(--ink);
-}
-
-.block-container {
-    max-width: 1220px;
-    padding-top: 1.5rem;
-    padding-bottom: 3rem;
-}
-
-h1, h2, h3, h4, h5, h6, p, span, button, label {
-    letter-spacing: 0;
-}
-
-h1, h2, h3 {
-    color: var(--ink);
-}
-
-#MainMenu,
-footer {
-    visibility: hidden;
-}
-
-[data-testid="stHeader"] {
-    background: rgba(240, 244, 242, 0.95);
-    border-bottom: 1px solid var(--line);
-}
-
-button, [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"] {
-    border-radius: 8px !important;
-    white-space: nowrap !important;
-}
-
-[data-testid="stSidebar"] {
-    background: var(--sidebar-bg);
-    border-right: 1px solid var(--line);
-}
-
-[data-testid="stSidebar"],
-[data-testid="stSidebar"] * {
-    color: var(--ink) !important;
-}
-
-[data-testid="stSidebar"] section {
-    padding-top: 1rem;
-}
-
-[data-testid="stSidebar"] small,
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-    color: var(--muted) !important;
-}
-
-[data-testid="stSidebar"] input,
-[data-testid="stSidebar"] textarea,
-[data-testid="stSidebar"] [data-baseweb="select"] > div,
-[data-testid="stSidebar"] [data-baseweb="input"] > div {
-    background: var(--input-bg) !important;
-    border: 1px solid var(--line) !important;
-    border-radius: 8px !important;
-    color: var(--ink) !important;
-}
-
-[data-testid="stSidebar"] button {
-    background: var(--surface-soft) !important;
-    border-color: var(--line) !important;
-    color: var(--ink) !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stMetric"] {
-    background: var(--surface-soft);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 0.8rem;
-}
-
-[data-testid="stMetric"] {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 1rem;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-}
-
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-    overflow: visible !important;
-}
-
-[data-testid="stDataFrame"] {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-[data-testid="stDataFrame"] * {
-    color: var(--ink);
-}
-
-[data-testid="stExpander"] {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-}
-
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] p {
-    color: var(--ink) !important;
-}
-
-[data-testid="stAlert"] {
-    border-radius: 8px;
-}
-
-[data-testid="stCheckbox"] label,
-[data-testid="stCheckbox"] p {
-    color: var(--ink) !important;
-}
-
-.stTabs [data-baseweb="tab-list"] {
-    gap: 0.4rem;
-    border-bottom: 1px solid var(--line);
-    background: transparent;
-}
-
-[data-baseweb="popover"] {
-    z-index: 999999 !important;
-}
-
-.stTabs [data-baseweb="tab"] {
-    border-radius: 8px 8px 0 0;
-    padding: 0.7rem 1rem;
-    background: transparent;
-}
-
-.stTabs [data-baseweb="tab"] p {
-    color: var(--muted) !important;
-}
-
-.stTabs [aria-selected="true"] p {
-    color: var(--coral) !important;
-}
-
-/* Input fields light styling */
-input, textarea, [data-baseweb="select"] > div, [data-baseweb="input"] > div {
-    background: var(--input-bg) !important;
-    border-color: var(--line) !important;
-    color: var(--ink) !important;
-}
-
-/* ---- Custom components ---- */
-
-.app-header {
-    margin: 0 0 1.25rem;
-    padding: 0.5rem 0 1.25rem;
-    border-bottom: 1px solid var(--line);
-}
-
-.eyebrow {
-    color: var(--muted);
-    font-size: 0.78rem;
-    font-weight: 700;
-    margin: 0 0 0.35rem;
-    text-transform: uppercase;
-}
-
-.app-header h1 {
-    font-size: 2.5rem;
-    line-height: 1.07;
-    margin: 0;
-    color: var(--ink);
-}
-
-.header-subtitle {
-    color: var(--muted);
-    font-size: 1.05rem;
-    line-height: 1.6;
-    margin: 0.7rem 0 1rem;
-    max-width: 760px;
-}
-
-.header-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.55rem;
-}
-
-.meta-pill,
-.status-pill {
-    align-items: center;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    color: var(--ink);
-    display: inline-flex;
-    font-size: 0.88rem;
-    gap: 0.35rem;
-    line-height: 1.35;
-    min-width: 0;
-    padding: 0.45rem 0.65rem;
-    word-break: break-word;
-}
-
-.status-pill.good {
-    background: #eef7e6;
-    border-color: #6aaa2e;
-    color: #2d6010;
-}
-
-.status-pill.watch {
-    background: #e6f5f7;
-    border-color: #2a9daa;
-    color: #0d5f68;
-}
-
-.status-pill.critical {
-    background: #fdecea;
-    border-color: #c9433b;
-    color: #8b1c18;
-}
-
-.section-heading {
-    margin: 1.4rem 0 0.8rem;
-}
-
-.section-heading h2 {
-    font-size: 1.45rem;
-    line-height: 1.25;
-    margin: 0;
-    color: var(--ink);
-}
-
-.section-heading p {
-    color: var(--muted);
-    margin: 0.25rem 0 0;
-}
-
-.metric-card {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-    min-height: 132px;
-    padding: 1rem;
-}
-
-.metric-card.good {
-    border-left: 6px solid var(--lime);
-}
-
-.metric-card.watch {
-    border-left: 6px solid var(--cyan);
-}
-
-.metric-card.critical {
-    border-left: 6px solid var(--coral);
-}
-
-.metric-label {
-    color: var(--muted);
-    display: block;
-    font-size: 0.82rem;
-    font-weight: 700;
-    margin-bottom: 0.45rem;
-    text-transform: uppercase;
-}
-
-.metric-value {
-    color: var(--ink);
-    display: block;
-    font-size: 1.55rem;
-    font-weight: 780;
-    line-height: 1.15;
-    overflow-wrap: anywhere;
-}
-
-.metric-helper {
-    color: var(--muted);
-    display: block;
-    font-size: 0.9rem;
-    line-height: 1.45;
-    margin-top: 0.65rem;
-}
-
-.score-panel,
-.callout {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    margin: 1rem 0;
-    padding: 1rem;
-}
-
-.score-panel.good {
-    border-left: 6px solid var(--lime);
-}
-
-.score-panel.watch {
-    border-left: 6px solid var(--cyan);
-}
-
-.score-panel.critical {
-    border-left: 6px solid var(--coral);
-}
-
-.score-topline {
-    align-items: center;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    justify-content: space-between;
-    margin-bottom: 0.75rem;
-    color: var(--ink);
-}
-
-.score-rail {
-    background: #e2e8e5;
-    border-radius: 8px;
-    height: 14px;
-    overflow: hidden;
-}
-
-.score-fill {
-    background: var(--cyan);
-    border-radius: 8px;
-    height: 14px;
-}
-
-.score-fill.good {
-    background: var(--lime);
-}
-
-.score-fill.critical {
-    background: var(--coral);
-}
-
-.callout.good {
-    background: #f0f9e8;
-    border-color: #6aaa2e;
-    color: var(--ink);
-}
-
-.callout.watch {
-    background: #e8f6f8;
-    border-color: #2a9daa;
-    color: var(--ink);
-}
-
-.callout.critical {
-    background: #fdf0ef;
-    border-color: #c9433b;
-    color: var(--ink);
-}
-
-.callout h3 {
-    font-size: 1.05rem;
-    margin: 0 0 0.6rem;
-    color: var(--ink);
-}
-
-.callout ul {
-    margin: 0;
-    padding-left: 1.2rem;
-}
-
-.callout li {
-    margin: 0.3rem 0;
-    color: var(--ink);
-}
-
-.source-note {
-    background: var(--surface-soft);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    color: var(--muted);
-    line-height: 1.55;
-    margin-top: 0.8rem;
-    padding: 0.8rem 1rem;
-}
-
-@media (max-width: 900px) {
-    .app-header h1 {
-        font-size: 2rem;
-    }
-}
-</style>
-"""
-
-st.set_page_config(
-    page_title="Construction Project Efficiency Estimator",
-    layout="wide",
-)
-
-
-@st.cache_data
-def get_historical_projects():
-    return load_historical_projects(DATA_PATH)
-
-
-@st.cache_data
-def get_pricing_rows():
-    return load_pricing_matrix(PRICING_PATH)
-
-
-def _get_package_ids() -> list[int]:
-    if PACKAGE_IDS_STATE_KEY not in st.session_state:
-        st.session_state[PACKAGE_IDS_STATE_KEY] = [0]
-    return list(st.session_state[PACKAGE_IDS_STATE_KEY])
-
-
-def _add_package_row() -> None:
-    package_ids = _get_package_ids()
-    next_id = max(package_ids, default=-1) + 1
-    st.session_state[PACKAGE_IDS_STATE_KEY] = [*package_ids, next_id]
-
-
-def _remove_package_row(package_id: int) -> None:
-    remaining_ids = [item for item in _get_package_ids() if item != package_id]
-    st.session_state[PACKAGE_IDS_STATE_KEY] = remaining_ids or [0]
-    for prefix in ("element_type", "width", "height", "quantity"):
-        st.session_state.pop(f"{prefix}_{package_id}", None)
-
-
-def main() -> None:
-    _inject_design()
-
-    pricing_rows = get_pricing_rows()
-    historical_projects = get_historical_projects()
-
-    input_column, output_column = st.columns([0.30, 0.70], gap="large")
-
-    with input_column:
-        with st.container(border=True):
-            project, pricing_estimate = render_inputs(pricing_rows)
-
-    result = evaluate_project(project, historical_projects)
-
-    with output_column:
-        render_header(project, result, pricing_estimate)
-        render_summary(result, project)
-
-        price_tab, scoring_tab, matrix_tab, history_tab = st.tabs(
-            ["Price Build-up", "Risk Logic", "Price Matrix", "Historical Cases"]
-        )
-        with price_tab:
-            render_pricing_estimate(pricing_estimate)
-        with scoring_tab:
-            render_explainability(result)
-        with matrix_tab:
-            render_price_matrix(pricing_rows, pricing_estimate)
-        with history_tab:
-            render_historical_context(result)
-
-
-def render_inputs(pricing_rows) -> tuple[ProjectInput, object]:
-    st.title("Inputs")
-    st.caption("Adjust the package, commercial values, schedule, and known uncertainty.")
-    st.divider()
-
-    st.subheader("Element Package")
-
-    # Initialize constructions list in session state
-    if "constructions_list" not in st.session_state:
-        st.session_state.constructions_list = []
-
-    element_types = get_pricing_options(pricing_rows, "element_type")
-
-    # Single input form - always one, never duplicates
-    new_type = st.selectbox("Element type", element_types, key="input_element_type")
-    col_w, col_h, col_q = st.columns(3)
-    new_w = col_w.number_input("W (m)", min_value=0.1, value=1.0, step=0.1, key="input_width")
-    new_h = col_h.number_input("H (m)", min_value=0.1, value=1.0, step=0.1, key="input_height")
-    new_q = int(col_q.number_input("Qty", min_value=1, value=1, step=1, key="input_qty"))
-
-    if st.button("＋  Add construction", use_container_width=True):
-        st.session_state.constructions_list.append({
-            "element_type": new_type,
-            "width_m": new_w,
-            "height_m": new_h,
-            "quantity": new_q,
-        })
-        st.rerun()
-
-    # Build package_rows from session state
-    package_rows = list(st.session_state.constructions_list)
-
-    # Fallback: if empty add one default
-    if not package_rows:
-        package_rows = [{
-            "element_type": new_type,
-            "width_m": new_w,
-            "height_m": new_h,
-            "quantity": new_q,
-        }]
-
-    # Also keep package_ids for compatibility
-    package_ids = list(range(len(package_rows)))
-
-    st.caption(
-        f"Package: {len(package_rows)} item(s), "
-        f"{sum(r['quantity'] for r in package_rows)} units"
-    )
-
-    glass_supply_model = st.selectbox(
-        "Glass supply model",
-        get_pricing_options(pricing_rows, "glass_supply_model"),
-        format_func=_format_glass_supply_model,
-    )
-    wind_load = st.selectbox("Wind load", get_pricing_options(pricing_rows, "wind_load"))
-    thermal_performance = st.selectbox(
-        "Thermal performance",
-        get_pricing_options(pricing_rows, "thermal_performance"),
-    )
-    coating_type = st.selectbox("Coating type", get_pricing_options(pricing_rows, "coating_type"))
-
-    pricing_inputs = [
-        PricingInput(
-            element_type=package_row["element_type"],
-            width_m=package_row["width_m"],
-            height_m=package_row["height_m"],
-            quantity=package_row["quantity"],
-            glass_supply_model=glass_supply_model,
-            wind_load=wind_load,
-            thermal_performance=thermal_performance,
-            coating_type=coating_type,
-        )
-        for package_row in package_rows
-    ]
-    pricing_estimate = aggregate_pricing_estimates(
-        [estimate_price(pricing_input, pricing_rows) for pricing_input in pricing_inputs]
-    )
-    st.caption(
-        "Package summary: "
-        f"{pricing_estimate.package_count} construction"
-        f"{'' if pricing_estimate.package_count == 1 else 's'}, "
-        f"{pricing_estimate.total_quantity} units, {pricing_estimate.total_area_m2:.1f} m2"
-    )
-
-    project_name = _project_name_from_packages(package_rows)
-    project_type = _project_type_from_packages(package_rows)
-    material_type = _material_type_from_packages(package_rows)
-    region = _coating_to_region(coating_type)
-    wind_exposure = _wind_load_to_exposure(wind_load)
-    technical_complexity = _technical_complexity_from_selection(wind_exposure, coating_type)
-    design_repetition = _design_repetition_from_packages(package_rows)
-    installation_model = _glass_supply_to_installation_model(glass_supply_model)
-
-    st.divider()
-    st.subheader("Commercial and Schedule")
-    use_price_for_financials = st.checkbox(
-        "Use calculated price for financial evaluation",
-        value=True,
-    )
-    if use_price_for_financials:
-        contract_value = pricing_estimate.total_final_price_gbp
-        estimated_cost = pricing_estimate.total_cost_before_margin_gbp
-        st.metric("Contract value", _gbp(contract_value))
-        st.metric("Estimated cost before margin", _gbp(estimated_cost))
+# ============================================================
+# DATA MODEL
+# ============================================================
+@dataclass
+class Construction:
+    item_name: str
+    item_type: str
+    width_mm: float
+    height_mm: float
+    qty: int
+    weight_kg: float
+    glass_mode: str = "Glazed"  # "Glazed" | "Unglazed" | "Without glass"
+    glass_weight_kg: float = 0.0
+    rotated: bool = False  # if True, width and height are swapped for packing
+
+
+# ============================================================
+# PACKING RULES
+# ============================================================
+def min_pallet_width_by_height(height_mm: float) -> int:
+    if height_mm <= 1000:
+        return 400
+    if height_mm <= 2000:
+        return 800
+    if height_mm <= MAX_PACKING_HEIGHT:
+        return 1200
+    return 0
+
+
+def round_up_pallet_width(size_mm: float) -> int:
+    if size_mm <= 1000:
+        return 1000
+    if size_mm <= 1500:
+        return 1500
+    if size_mm <= 2500:
+        return 2500
+    if size_mm <= 3500:
+        return 3500
+    if size_mm <= 5000:
+        return 5000
+    if size_mm <= 6000:
+        return 6000
+    if size_mm <= 6600:
+        return 6600
+    return int(math.ceil(size_mm / 1000.0) * 1000)
+
+
+def real_pallet_width(width_mm: float, height_mm: float) -> float:
+    """Physical pallet width based on construction width.
+    < 3000mm: width + 100, >= 3000mm: width + 200.
+    Height does not affect pallet width (constructions are packed diagonally when height > 2700mm,
+    but the pallet footprint is still determined by width).
+    """
+    return width_mm + 200 if width_mm >= 3000 else width_mm + 100
+
+
+def pallet_price_eur(width_mm: float) -> float:
+    w = float(width_mm or 0)
+    if w <= 1000:
+        return 36.0
+    if w <= 1500:
+        return 52.0
+    if w <= 2500:
+        return 80.0
+    if w <= 3500:
+        return 95.0
+    if w <= 5000:
+        return 111.0
+    if w <= 6000:
+        return 145.0
+    if w <= 6600:
+        return 145.0
+    return 145.0
+
+
+def ldm_from_width(width_mm: float, count: int = 1) -> float:
+    return (float(width_mm) * float(count)) / TRUCK_WIDTH_M / 1000.0
+
+
+def calculate_construction(construction: Construction) -> Dict[str, object]:
+    # If rotated, swap width and height for all packing calculations
+    if construction.rotated:
+        calc_width  = construction.height_mm
+        calc_height = construction.width_mm
     else:
-        contract_value = st.number_input(
-            "Contract value, GBP",
-            min_value=0.0,
-            value=pricing_estimate.total_final_price_gbp,
-            step=100.0,
-        )
-        estimated_cost = st.number_input(
-            "Estimated cost, GBP",
-            min_value=0.0,
-            value=pricing_estimate.total_cost_before_margin_gbp,
-            step=100.0,
-        )
+        calc_width  = construction.width_mm
+        calc_height = construction.height_mm
 
-    evaluation_date = st.date_input("Evaluation date", value=date.today())
-    requested_deadline = st.date_input(
-        "Target project implementation date",
-        value=date.today() + timedelta(weeks=14),
-    )
-    material_lead_time_weeks = st.number_input("Material lead time, weeks", min_value=0, value=10, step=1)
-    production_capacity_hours_per_week = st.number_input(
-        "Production capacity, hours/week",
-        min_value=1,
-        value=40,
-        step=1,
-    )
+    real_width = real_pallet_width(calc_width, calc_height)
+    packed_sideways = calc_height > MAX_GLAZED_HEIGHT
+    is_heavy_type = construction.item_type.lower() in HEAVY_GLAZING_TYPES
+    is_facade = construction.item_type.lower() in FACADE_TYPES
+    parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
 
-    st.divider()
-    st.subheader("Security Requirements")
-    package_contains_openings = any(
-        "window" in row["element_type"].lower() or "door" in row["element_type"].lower()
-        for row in package_rows
-    )
-    pas24_required = st.checkbox(
-        "PAS 24 compliance required",
-        value=package_contains_openings,
-        help="UK security standard for doors and windows. Select when specified in the project requirements.",
-    )
-    resistance_class = st.selectbox(
-        "Burglary resistance class",
-        ["None", "RC2", "RC3"],
-        help=(
-            "RC2 and RC3 are independent resistance classes. "
-            "Select only when the project specification explicitly requires it."
-        ),
-    )
-    access_control_required = st.checkbox(
-        "Access control / electric locking required",
-        help="Additional complexity for electric locking systems.",
-    )
-    st.caption(
-        "Security selections are project inputs. They must be supported by the project "
-        "specification; the estimator does not verify certification."
-    )
+    # For multi-part sliding doors, pallet width is full width (not per part)
+    # Only glass weight is split by number of parts
 
-    st.divider()
-    st.subheader("Known Uncertainties")
-    non_standard_profiles = st.checkbox("Non-standard profiles")
-    incomplete_drawings = st.checkbox("Incomplete drawings")
-    missing_installation_details = st.checkbox("Missing installation details", value=True)
+    mode = construction.glass_mode
 
-    project = ProjectInput(
-        project_name=project_name,
-        project_type=project_type,
-        contract_value=contract_value,
-        estimated_cost=estimated_cost,
-        evaluation_date=evaluation_date,
-        requested_deadline=requested_deadline,
-        material_type=material_type,
-        region=region,
-        wind_exposure=wind_exposure,
-        technical_complexity=technical_complexity,
-        design_repetition=design_repetition,
-        installation_model=installation_model,
-        element_quantity=pricing_estimate.total_quantity,
-        package_area_m2=pricing_estimate.total_area_m2,
-        production_hours_per_unit=pricing_estimate.fabrication_time_hours_per_unit,
-        production_capacity_hours_per_week=float(production_capacity_hours_per_week),
-        material_lead_time_weeks=int(material_lead_time_weeks),
-        non_standard_profiles=non_standard_profiles,
-        incomplete_drawings=incomplete_drawings,
-        missing_installation_details=missing_installation_details,
-        pas24_required=pas24_required,
-        resistance_class=resistance_class,
-        access_control_required=access_control_required,
-    )
-    return project, pricing_estimate
+    if calc_height > MAX_CONSTRUCTION_HEIGHT:
+        return {
+            "Item": construction.item_name,
+            "Type": construction.item_type,
+            "Width (mm)": float(construction.width_mm),
+            "Height (mm)": float(construction.height_mm),
+            "Qty": int(construction.qty),
+            "Unit weight (kg)": float(construction.weight_kg),
+            "Glass weight (kg)": float(construction.glass_weight_kg),
+            "Glass mode": mode,
+            "Rotated": "YES" if construction.rotated else "NO",
+            "Packed as": "NOT POSSIBLE",
+            "Glass separate": "N/A",
+            "Packed sideways": "N/A",
+            "Max per pallet": "N/A",
+            "Pallet width (mm)": "N/A",
+            "Notes": "Construction size exceeds current pallet pricing ranges",
+        }
 
+    packed_as = "UNGLAZED"
+    glass_separate = "NO"
+    notes = "Packed without glass"
 
-def generate_pdf_report(project, result, pricing_estimate) -> bytes:
-    """Generate a PDF report and return it as bytes."""
-    import io as _io
-    from reportlab.lib import colors as rl_colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import (
-        HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
-    )
+    if mode == "Without glass":
+        # glass is not ours — no glass box, just pack the frame
+        packed_as = "UNGLAZED"
+        glass_separate = "NO"
+        notes = "Without glass — frame only"
 
-    buffer = _io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4,
-        leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm,
-    )
-    styles = getSampleStyleSheet()
-    ink = rl_colors.HexColor("#1a2420")
-    muted = rl_colors.HexColor("#6b7c75")
-    lime = rl_colors.HexColor("#4a8c1c")
-    cyan = rl_colors.HexColor("#0e8f9c")
-    coral = rl_colors.HexColor("#d94f45")
-    light_bg = rl_colors.HexColor("#f4f7f5")
-    line_color = rl_colors.HexColor("#d4ddd8")
+    elif mode == "Unglazed":
+        # glass travels separately → glass box needed
+        packed_as = "UNGLAZED"
+        glass_separate = "YES"
+        notes = "Glass packed separately"
+        if construction.item_type.lower() == "sliding door" and construction.width_mm > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif packed_sideways:
+            notes = "Glass packed separately; construction packed sideways"
 
-    tone_color = {"good": lime, "watch": cyan, "critical": coral}
-    tone = _risk_tone(result.risk_level)
-    accent = tone_color.get(tone, cyan)
-
-    title_style = ParagraphStyle("RPTitle", parent=styles["Title"], textColor=ink, fontSize=22, spaceAfter=4)
-    subtitle_style = ParagraphStyle("RPSubtitle", parent=styles["Normal"], textColor=muted, fontSize=10, spaceAfter=10)
-    h2_style = ParagraphStyle("RPH2", parent=styles["Heading2"], textColor=ink, fontSize=14, spaceBefore=14, spaceAfter=6)
-    eyebrow_style = ParagraphStyle("RPEyebrow", parent=styles["Normal"], textColor=muted, fontSize=8, fontName="Helvetica-Bold", spaceAfter=2)
-    normal_style = ParagraphStyle("RPNormal", parent=styles["Normal"], textColor=ink, fontSize=10)
-    small_style = ParagraphStyle("RPSmall", parent=styles["Normal"], textColor=muted, fontSize=8)
-
-    def _tbl(data, col_widths=None):
-        w = A4[0] - 40*mm
-        if col_widths is None:
-            n = len(data[0])
-            col_widths = [w/n]*n
-        t = Table(data, colWidths=col_widths)
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), light_bg),
-            ("TEXTCOLOR", (0, 0), (-1, 0), muted),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 8),
-            ("FONTSIZE", (0, 1), (-1, -1), 9),
-            ("TEXTCOLOR", (0, 1), (-1, -1), ink),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, light_bg]),
-            ("GRID", (0, 0), (-1, -1), 0.5, line_color),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ]))
-        return t
-
-    story = []
-
-    # Header
-    from datetime import date as _date
-    story.append(Paragraph(project.project_name, title_style))
-    story.append(Paragraph(
-        f"Type: {project.project_type}  ·  Target: {project.requested_deadline.isoformat()}  ·  "
-        f"Generated: {_date.today().isoformat()}",
-        subtitle_style,
-    ))
-    story.append(HRFlowable(width="100%", thickness=2, color=accent, spaceAfter=10))
-
-    # Risk & Efficiency
-    story.append(Paragraph("DECISION SIGNAL", eyebrow_style))
-    story.append(Paragraph("Risk and Efficiency Evaluation", h2_style))
-    metrics_data = [
-        ["METRIC", "VALUE", "NOTE"],
-        ["Efficiency Score", f"{result.efficiency_score:.1f} / 100", "Weighted tender readiness"],
-        ["Risk Level", result.risk_level, "Current decision band"],
-        ["Target Implementation", project.requested_deadline.isoformat(), "Customer target date"],
-        ["Earliest Implementation", result.readiness_date.isoformat(), "Material lead time + preparation"],
-        ["Material Lead Time", f"{result.material_lead_time_weeks} weeks", ""],
-        ["Total Timeline", f"{result.total_preparation_weeks:g} weeks", ""],
-        ["Package Volume", f"{project.element_quantity} units", f"{project.package_area_m2:.0f} m2"],
-        ["Security Requirements", result.security_requirement, "Project input; evidence must be checked"],
-    ]
-    story.append(_tbl(metrics_data, [70*mm, 55*mm, 50*mm]))
-    story.append(Spacer(1, 8))
-
-    # Alerts
-    story.append(Paragraph("ALERTS", eyebrow_style))
-    if result.alerts:
-        for alert in result.alerts:
-            story.append(Paragraph(f"- {alert}", ParagraphStyle("RPAlert", parent=normal_style, textColor=coral)))
-    else:
-        story.append(Paragraph("No critical alerts for current inputs.", ParagraphStyle("RPOK", parent=normal_style, textColor=lime)))
-    story.append(Spacer(1, 10))
-
-    # Pricing
-    story.append(HRFlowable(width="100%", thickness=0.5, color=line_color, spaceAfter=6))
-    story.append(Paragraph("COMMERCIAL VIEW", eyebrow_style))
-    story.append(Paragraph("Price Build-up", h2_style))
-    price_data = [
-        ["COMPONENT", "PER UNIT", "TOTAL"],
-        ["Material", _gbp(pricing_estimate.material_gbp), _gbp(pricing_estimate.total_material_gbp)],
-        ["Glass unit", _gbp(pricing_estimate.glass_gbp), _gbp(pricing_estimate.total_glass_gbp)],
-        ["Labour work", _gbp(pricing_estimate.labour_gbp), _gbp(pricing_estimate.total_labour_gbp)],
-        ["Coating", _gbp(pricing_estimate.coating_gbp), _gbp(pricing_estimate.total_coating_gbp)],
-        [f"Margin ({pricing_estimate.margin_rate * 100:.0f}%)", _gbp(pricing_estimate.margin_gbp), _gbp(pricing_estimate.total_margin_gbp)],
-        ["TOTAL FINAL PRICE", _gbp(pricing_estimate.final_price_gbp), _gbp(pricing_estimate.total_final_price_gbp)],
-    ]
-    pt = _tbl(price_data, [80*mm, 50*mm, 45*mm])
-    pt.setStyle(TableStyle([
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), light_bg),
-    ]))
-    story.append(pt)
-    story.append(Spacer(1, 10))
-
-    # Scoring breakdown
-    story.append(HRFlowable(width="100%", thickness=0.5, color=line_color, spaceAfter=6))
-    story.append(Paragraph("RULE TRACE", eyebrow_style))
-    story.append(Paragraph("Scoring Logic", h2_style))
-    score_data = [["CRITERION", "SCORE", "WEIGHT", "EXPLANATION"]]
-    for key, value in result.score_breakdown.items():
-        score_data.append([
-            key.replace("_", " ").title(),
-            str(value),
-            f"{_score_weight(key) * 100:.0f}%",
-            result.explanations[key],
-        ])
-    story.append(_tbl(score_data, [35*mm, 18*mm, 18*mm, 104*mm]))
-    story.append(Spacer(1, 10))
-
-    # Checklist
-    story.append(Paragraph("NEXT ACTIONS", eyebrow_style))
-    story.append(Paragraph("Generated Checklist", h2_style))
-    for item in result.checklist:
-        story.append(Paragraph(f"  {item}", normal_style))
-    story.append(Spacer(1, 6))
-
-    # Footer
-    story.append(HRFlowable(width="100%", thickness=0.5, color=line_color, spaceBefore=10, spaceAfter=4))
-    story.append(Paragraph(
-        f"Construction Project Efficiency Estimator  ·  {_date.today().isoformat()}",
-        small_style,
-    ))
-
-    doc.build(story)
-    return buffer.getvalue()
-
-
-
-def render_header(project: ProjectInput, result, pricing_estimate) -> None:
-    tone = _risk_tone(result.risk_level)
-    st.markdown(
-        f"""
-        <section class="app-header">
-            <h1>{escape(project.project_name)}</h1>
-            <p class="header-subtitle">
-                Pricing, schedule, margin, and execution risk for the selected package.
-            </p>
-            <div class="header-meta">
-                <span class="meta-pill">Type: {escape(project.project_type)}</span>
-                <span class="meta-pill">Target: {escape(project.requested_deadline.isoformat())}</span>
-                <span class="meta-pill">Security: {escape(result.security_requirement)}</span>
-                <span class="status-pill {tone}">{escape(result.risk_level)}</span>
-            </div>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
-    pdf_bytes = generate_pdf_report(project, result, pricing_estimate)
-    filename = project.project_name.lower().replace(" ", "_") + ".pdf"
-    st.download_button(
-        label="📄 Download PDF Report",
-        data=pdf_bytes,
-        file_name=filename,
-        mime="application/pdf",
-    )
-
-
-def render_summary(result, project: ProjectInput) -> None:
-    tone = _risk_tone(result.risk_level)
-    st.markdown(
-        """
-        <div class="section-heading">
-            <p class="eyebrow">Decision signal</p>
-            <h2>Risk and efficiency evaluation</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    first, second, third, fourth = st.columns(4)
-    with first:
-        _metric_card("Efficiency score", f"{result.efficiency_score:.1f}/100", "Weighted tender readiness.", tone)
-    with second:
-        _metric_card("Risk level", result.risk_level, "Current decision band.", tone)
-    with third:
-        _metric_card("Target implementation", project.requested_deadline.isoformat(), "Customer target date.")
-    with fourth:
-        _metric_card("Earliest implementation", result.readiness_date.isoformat(), "Material lead time plus preparation.")
-
-    material_ready_date = project.evaluation_date + timedelta(weeks=result.material_lead_time_weeks)
-    if project.requested_deadline < material_ready_date:
-        st.error(
-            "Material lead time is too short for the selected target date. "
-            f"Earliest material readiness date is {material_ready_date.isoformat()}."
-        )
-
-    _score_panel(result.efficiency_score, result.risk_level)
-
-    st.markdown(
-        f'<div class="source-note"><strong>Security requirement:</strong> '
-        f'{escape(result.security_requirement)}. Evidence and certification remain subject to project review.</div>',
-        unsafe_allow_html=True,
-    )
-
-    lead_first, lead_second, lead_third, lead_fourth = st.columns(4)
-    with lead_first:
-        _metric_card("Material lead time", f"{result.material_lead_time_weeks} weeks")
-    with lead_second:
-        _metric_card(
-            "Preparation",
-            _format_production_duration(result.preparation_hours, result.preparation_weeks),
-            f"{result.preparation_hours:g} hours at {project.production_capacity_hours_per_week:g} h/week",
-        )
-    with lead_third:
-        _metric_card("Total timeline", f"{result.total_preparation_weeks:g} weeks")
-    with lead_fourth:
-        _metric_card("Package volume", f"{project.element_quantity} units", f"{project.package_area_m2:.0f} m2")
-
-    if result.alerts:
-        _callout("Alerts to resolve", result.alerts, "critical")
-    else:
-        _callout("No critical alerts", ["Current inputs do not trigger a critical alert."], "good")
-
-
-def render_pricing_estimate(estimate) -> None:
-    heading = "Element price estimate" if estimate.package_count == 1 else "Package price estimate"
-    st.markdown(
-        f"""
-        <div class="section-heading">
-            <p class="eyebrow">Commercial view</p>
-            <h2>{heading}</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    price_label = "Final price per unit" if estimate.package_count == 1 else "Average price per unit"
-    fabrication_label = "Fabrication time" if estimate.package_count == 1 else "Avg fabrication time"
-    fabrication_helper = "Per unit" if estimate.package_count == 1 else f"{estimate.total_fabrication_time_hours:g} hours total"
-
-    first, second, third, fourth = st.columns(4)
-    with first:
-        _metric_card(price_label, _gbp(estimate.final_price_gbp))
-    with second:
-        _metric_card("Total final price", _gbp(estimate.total_final_price_gbp))
-    with third:
-        packaging_cost = estimate.total_final_price_gbp * 0.03
-        transport_cost = estimate.total_final_price_gbp * 0.125
-        net_margin = estimate.total_margin_gbp - packaging_cost - transport_cost
-        _metric_card(
-            "Margin (after pkg & transport)",
-            _gbp(net_margin),
-            f"{estimate.margin_rate * 100:.0f}% rule − pkg 3% − transport 12.5%",
-        )
-    with fourth:
-        _metric_card(
-            fabrication_label,
-            _format_hours(estimate.fabrication_time_hours_per_unit),
-            fabrication_helper,
-        )
-
-    if estimate.package_count > 1:
-        # Editable constructions table
-        st.markdown("**Constructions**")
-        to_remove = None
-        constructions = st.session_state.get("constructions_list", [])
-        for i, row in enumerate(constructions):
-            c = st.columns([4, 1.2, 1.2, 1.2, 0.6])
-            constructions[i]["element_type"] = c[0].selectbox(
-                f"t{i}", get_pricing_options(pricing_rows, "element_type"),
-                index=get_pricing_options(pricing_rows, "element_type").index(row["element_type"])
-                      if row["element_type"] in get_pricing_options(pricing_rows, "element_type") else 0,
-                key=f"ct_{i}", label_visibility="collapsed",
-            )
-            constructions[i]["width_m"] = c[1].number_input(
-                f"w{i}", min_value=0.1, value=float(row["width_m"]), step=0.1,
-                key=f"cw_{i}", label_visibility="collapsed",
-            )
-            constructions[i]["height_m"] = c[2].number_input(
-                f"h{i}", min_value=0.1, value=float(row["height_m"]), step=0.1,
-                key=f"ch_{i}", label_visibility="collapsed",
-            )
-            constructions[i]["quantity"] = int(c[3].number_input(
-                f"q{i}", min_value=1, value=int(row["quantity"]), step=1,
-                key=f"cq_{i}", label_visibility="collapsed",
-            ))
-            if c[4].button("✕", key=f"cr_{i}", use_container_width=True):
-                to_remove = i
-        if to_remove is not None:
-            st.session_state.constructions_list.pop(to_remove)
-            st.rerun()
-        st.session_state.constructions_list = constructions
-        st.divider()
-        st.dataframe(
-            [
-                {
-                    "Element": item.source_row["element_type"],
-                    "Dimensions": f"{item.width_m:g} x {item.height_m:g} m",
-                    "Quantity": item.quantity,
-                    "Source item": item.source_item,
-                    "Total": _gbp(item.total_final_price_gbp),
-                }
-                for item in estimate.estimates
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # Calculate packaging and transport from total final price
-    packaging_total = estimate.total_final_price_gbp * 0.03
-    transport_total = estimate.total_final_price_gbp * 0.125
-    packaging_per_unit = packaging_total / max(1, estimate.total_quantity)
-    transport_per_unit = transport_total / max(1, estimate.total_quantity)
-
-    st.dataframe(
-        [
-            {
-                "Component": "Material",
-                "Per unit": _gbp(estimate.material_gbp),
-                "Total": _gbp(estimate.total_material_gbp),
-            },
-            {
-                "Component": "Glass unit",
-                "Per unit": _gbp(estimate.glass_gbp),
-                "Total": _gbp(estimate.total_glass_gbp),
-            },
-            {
-                "Component": "Labour work",
-                "Per unit": _gbp(estimate.labour_gbp),
-                "Total": _gbp(estimate.total_labour_gbp),
-            },
-            {
-                "Component": "Coating",
-                "Per unit": _gbp(estimate.coating_gbp),
-                "Total": _gbp(estimate.total_coating_gbp),
-            },
-            {
-                "Component": f"Margin ({estimate.margin_rate * 100:.0f}%)",
-                "Per unit": _gbp(estimate.margin_gbp),
-                "Total": _gbp(estimate.total_margin_gbp),
-            },
-            {
-                "Component": "Packaging (3%)",
-                "Per unit": _gbp(packaging_per_unit),
-                "Total": _gbp(packaging_total),
-            },
-            {
-                "Component": "Transport (12.5%)",
-                "Per unit": _gbp(transport_per_unit),
-                "Total": _gbp(transport_total),
-            },
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    source_items = ", ".join(str(item.source_item) for item in estimate.estimates)
-    source_note = (
-        "Base prices and fabrication time use the Excel matrix; margin "
-        "follows the selected glass supply rule."
-    )
-    if estimate.package_count == 1:
-        source_dimensions = estimate.estimates[0].source_dimensions
-        source_summary = f"Source matrix item {escape(str(estimate.estimates[0].source_item))}, base dimensions {escape(source_dimensions)}."
-    else:
-        source_summary = f"Source matrix items {escape(source_items)}."
-
-    st.markdown(
-        f"""
-        <div class="source-note">
-            {source_summary} {source_note}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_explainability(result) -> None:
-    st.markdown(
-        """
-        <div class="section-heading">
-            <p class="eyebrow">Rule trace</p>
-            <h2>Scoring logic</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.dataframe(
-        [
-            {
-                "Criterion": key.replace("_", " ").title(),
-                "Score": value,
-                "Weight": f"{_score_weight(key) * 100:.0f}%",
-                "Explanation": result.explanations[key],
-            }
-            for key, value in result.score_breakdown.items()
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.markdown(
-        """
-        <div class="section-heading">
-            <p class="eyebrow">Next actions</p>
-            <h2>Generated checklist</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    for index, item in enumerate(result.checklist):
-        st.checkbox(item, value=False, key=f"checklist_{index}")
-
-
-def render_price_matrix(pricing_rows, estimate) -> None:
-    st.markdown(
-        """
-        <div class="section-heading">
-            <p class="eyebrow">Source data</p>
-            <h2>Price matrix</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.dataframe(pricing_rows, use_container_width=True, hide_index=True)
-    with st.expander("Selected source rows" if estimate.package_count > 1 else "Selected source row"):
-        if estimate.package_count == 1:
-            st.json(estimate.estimates[0].source_row)
+    elif mode == "Glazed":
+        # glass travels with frame — check if any rule forces separation
+        if is_facade:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Facade — glass always packed separately"
+        elif construction.item_type.lower() == "sliding door" and calc_width > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled (split); glass packed separately; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif construction.item_type.lower() in ("double sliding door", "triple sliding door", "quad sliding door") and calc_width > MAX_SLIDING_WIDTH:
+            packed_as = "SPLIT"
+            glass_separate = "YES"
+            real_width = float(SPLIT_PALLET_WIDTH)
+            notes = f"Width exceeds {MAX_SLIDING_WIDTH} mm — partially assembled ({parts} parts); glass split into {parts} pieces; pallet width = {SPLIT_PALLET_WIDTH} mm"
+        elif packed_sideways:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = "Glass must be packed separately; construction packed sideways"
+        elif is_heavy_type and construction.weight_kg > MAX_PALLET_WEIGHT_KG:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = f"Weight exceeds {MAX_PALLET_WEIGHT_KG:.0f} kg — packed without glass; glass packed separately"
+        elif is_heavy_type and calc_width > MAX_GLAZED_WIDTH_HEAVY:
+            packed_as = "UNGLAZED"
+            glass_separate = "YES"
+            notes = f"Width exceeds {MAX_GLAZED_WIDTH_HEAVY} mm — glass packed separately"
         else:
-            st.dataframe(
-                [
-                    {
-                        "Element": item.source_row["element_type"],
-                        "Dimensions": f"{item.width_m:g} x {item.height_m:g} m",
-                        "Quantity": item.quantity,
-                        "Source item": item.source_item,
-                        "Base dimensions": item.source_dimensions,
-                        "Wind load": item.source_row["wind_load"],
-                        "Thermal": item.source_row["thermal_performance"],
-                        "Coating": item.source_row["coating_type"],
-                    }
-                    for item in estimate.estimates
-                ],
-                use_container_width=True,
-                hide_index=True,
+            packed_as = "GLAZED"
+            notes = "Can be packed with glass"
+
+    if mode != "Glazed" and packed_sideways and glass_separate == "NO":
+        notes += "; construction packed sideways"
+
+    max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
+    if packed_sideways:
+        max_per_pallet = 1
+
+    # Always store glass weight for visibility; it's used for pallet weight when glazed together
+    stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
+
+    if construction.rotated and "rotated" not in notes.lower():
+        notes += "; packed rotated (width↔height swapped)"
+
+    # For multi-part sliding doors: glass weight is total (not split), pallet width is per part
+    glass_parts = parts if parts > 1 else 1
+    glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
+
+    # Glass pallet width = width per part for multi-part sliding/folding doors
+    glass_pallet_width = round(real_pallet_width(calc_width / parts, calc_height)) if parts > 1 else int(real_width)
+
+    return {
+        "Item": construction.item_name,
+        "Type": construction.item_type,
+        "Width (mm)": float(construction.width_mm),
+        "Height (mm)": float(construction.height_mm),
+        "Qty": int(construction.qty),
+        "Unit weight (kg)": float(construction.weight_kg),
+        "Glass weight (kg)": stored_glass_weight,
+        "Glass parts": int(glass_parts),
+        "Glass pallet width (mm)": float(glass_pallet_width),
+        "Glass mode": mode,
+        "Rotated": "YES" if construction.rotated else "NO",
+        "Packed as": packed_as,
+        "Glass separate": glass_separate,
+        "Packed sideways": "YES" if packed_sideways else "NO",
+        "Max per pallet": int(max_per_pallet),
+        "Pallet width (mm)": int(real_width),
+        "Notes": notes,
+    }
+
+
+# ============================================================
+# PALLET PACKING
+# ============================================================
+def expand_by_qty(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in df.iterrows():
+        qty = int(row["Qty"])
+        for unit_idx in range(1, qty + 1):
+            rr = row.copy()
+            rr["Qty"] = 1
+            rr["Unit idx"] = unit_idx
+            rows.append(rr)
+    return pd.DataFrame(rows)
+
+
+def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
+    if units.empty:
+        return []
+
+    u = units.copy()
+    u["Unit weight (kg)"] = pd.to_numeric(u["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    u["Glass weight (kg)"] = pd.to_numeric(u.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+
+    # Total weight on pallet = frame + glass if glass is packed together, else frame only
+    u["_total_weight"] = u.apply(
+        lambda r: r["Unit weight (kg)"] + r["Glass weight (kg)"]
+        if r.get("Glass separate", "NO") == "NO" and r.get("Glass mode", "Without glass") == "Glazed"
+        else r["Unit weight (kg)"],
+        axis=1,
+    )
+
+    u = u.sort_values("_total_weight", ascending=False).reset_index(drop=True)
+
+    pallets: List[Dict[str, object]] = []
+
+    for _, item in u.iterrows():
+        w = float(item["_total_weight"])
+        try:
+            item_max = int(item["Max per pallet"])
+        except (KeyError, ValueError, TypeError):
+            item_max = MAX_ITEMS_PER_PALLET
+        placed = False
+
+        for pallet in pallets:
+            pallet_max = min(pallet["max_per_pallet"], item_max)
+            if (
+                pallet["weight_kg"] + w <= MAX_PALLET_WEIGHT_KG
+                and pallet["items_count"] + 1 <= pallet_max
+            ):
+                pallet["weight_kg"] += w
+                pallet["items_count"] += 1
+                pallet["max_per_pallet"] = pallet_max
+                pallet["items"].append(item)
+                placed = True
+                break
+
+        if not placed:
+            pallets.append(
+                {
+                    "weight_kg": w,
+                    "items_count": 1,
+                    "max_per_pallet": item_max,
+                    "items": [item],
+                }
             )
 
+    return pallets
 
-def render_historical_context(result) -> None:
-    st.markdown(
-        """
-        <div class="section-heading">
-            <p class="eyebrow">Reference cases</p>
-            <h2>Historical similarity</h2>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+def _get_pallet_width(item) -> float:
+    """Get pallet width from item, handling different column name versions."""
+    for col in ("Pallet width (mm)", "Real pallet width (mm)"):
+        try:
+            v = item[col]
+            f = float(v)
+            if not math.isnan(f):
+                return f
+        except (KeyError, ValueError, TypeError):
+            pass
+    try:
+        return real_pallet_width(float(item["Width (mm)"]), float(item["Height (mm)"]))
+    except Exception:
+        return 1200.0
+
+
+def build_pallet_outputs(results_df: pd.DataFrame):
+    valid_df = results_df[~results_df["Packed as"].isin(["NOT POSSIBLE"])].copy()
+    if valid_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0.0, 0.0
+
+    units = expand_by_qty(valid_df)
+    pallets = pack_mixed(units)
+
+    pallet_summary_rows = []
+    plan_rows = []
+    total_pallet_cost = 0.0
+    total_pallet_ldm = 0.0
+
+    for i, pallet in enumerate(pallets, start=1):
+        items_df = pd.DataFrame(pallet["items"])
+
+        pallet_real_width = float(items_df.apply(_get_pallet_width, axis=1).max())
+        pallet_req_width = round_up_pallet_width(pallet_real_width)
+        pallet_price = pallet_price_eur(pallet_req_width)
+        pallet_ldm = ldm_from_width(pallet_real_width, 1)
+
+        total_pallet_cost += pallet_price
+        total_pallet_ldm += pallet_ldm
+
+        pallet_summary_rows.append(
+            {
+                "Pallet no": i,
+                "Pallet weight (kg)": round(float(pallet["weight_kg"]), 2),  # frame + glass if glazed together
+                "Constructions count": int(items_df["Item"].nunique()),
+                "Units count": int(len(items_df)),
+                "Pallet width (mm)": round(pallet_real_width, 1),
+                "Pallet price (EUR)": pallet_price,
+                "Pallet LDM": round(pallet_ldm, 3),
+            }
+        )
+
+        for _, item in items_df.iterrows():
+            plan_rows.append(
+                {
+                    "Pallet no": i,
+                    "Item": item["Item"],
+                    "Type": item["Type"],
+                    "Width (mm)": item["Width (mm)"],
+                    "Height (mm)": item["Height (mm)"],
+                    "Unit weight (kg)": item["Unit weight (kg)"],
+                    "Packed as": item["Packed as"],
+                    "Glass separate": item["Glass separate"],
+                    "Packed sideways": item["Packed sideways"],
+                    "Pallet width (mm)": _get_pallet_width(item),
+                    "Unit idx": item["Unit idx"],
+                }
+            )
+
+    pallet_summary_df = pd.DataFrame(pallet_summary_rows)
+    plan_df = pd.DataFrame(plan_rows)
+    return pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm
+
+
+def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: int, glass_cost: float, glass_ldm: float, total_glass_weight: float, glass_pallet_width: float = 1200) -> pd.DataFrame:
+    """Append glass box rows to pallet summary."""
+    if glass_boxes <= 0:
+        return pallet_summary_df
+    last_pallet_no = int(pallet_summary_df["Pallet no"].max()) if not pallet_summary_df.empty else 0
+    glass_rows = []
+    for i in range(glass_boxes):
+        glass_rows.append({
+            "Pallet no": last_pallet_no + i + 1,
+            "Pallet weight (kg)": round(total_glass_weight / glass_boxes, 2),
+            "Constructions count": "-",
+            "Units count": "-",
+            "Pallet width (mm)": round(glass_pallet_width, 1),
+            "Pallet price (EUR)": glass_cost / glass_boxes,
+            "Pallet LDM": round(glass_ldm / glass_boxes, 3),
+            "Note": "GLASS BOX",
+        })
+    glass_df = pd.DataFrame(glass_rows)
+    return pd.concat([pallet_summary_df, glass_df], ignore_index=True)
+
+# ============================================================
+# GLASS BOXES
+# ============================================================
+def calculate_glass_boxes(results_df: pd.DataFrame):
+    if results_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
+    if separate_glass_df.empty:
+        return 0, 0.0, 0.0, 0.0
+
+    # Use glass weight per part if available (for split sliding doors)
+    if "Glass weight per part (kg)" in separate_glass_df.columns and "Glass parts" in separate_glass_df.columns:
+        glass_w = pd.to_numeric(separate_glass_df["Glass weight per part (kg)"], errors="coerce").fillna(0.0)
+        glass_parts = pd.to_numeric(separate_glass_df["Glass parts"], errors="coerce").fillna(1.0)
+    else:
+        glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
+        glass_parts = pd.Series([1.0] * len(separate_glass_df), index=separate_glass_df.index)
+
+    unit_w = pd.to_numeric(separate_glass_df["Unit weight (kg)"], errors="coerce").fillna(0.0)
+    effective_glass_w = glass_w.where(glass_w > 0, unit_w)
+
+    total_glass_weight = float(
+        (
+            effective_glass_w
+            * glass_parts
+            * pd.to_numeric(separate_glass_df["Qty"], errors="coerce").fillna(0)
+        ).sum()
     )
-    st.dataframe(result.similar_projects, use_container_width=True, hide_index=True)
+
+    if total_glass_weight <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
+    glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
+
+    # Glass pallet width = max glass pallet width among constructions with separate glass
+    if "Glass pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Glass pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    elif "Pallet width (mm)" in separate_glass_df.columns:
+        glass_pallet_width = float(
+            pd.to_numeric(separate_glass_df["Pallet width (mm)"], errors="coerce").fillna(GLASS_PALLET_WIDTH_MM).max()
+        )
+    else:
+        glass_pallet_width = float(GLASS_PALLET_WIDTH_MM)
+
+    glass_ldm = ldm_from_width(glass_pallet_width, glass_boxes)
+
+    return glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width
 
 
-def _inject_design() -> None:
-    st.markdown(APP_CSS, unsafe_allow_html=True)
+# ============================================================
+# EXPORT
+# ============================================================
+def make_excel_file(results_df, pallet_summary_df, plan_df, kpi_df) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        kpi_df.to_excel(writer, sheet_name="Summary", index=False)
+        results_df.to_excel(writer, sheet_name="Constructions", index=False)
+        pallet_summary_df.to_excel(writer, sheet_name="Pallet Summary", index=False)
+        plan_df.to_excel(writer, sheet_name="Packing Plan", index=False)
+    return output.getvalue()
 
 
-def _metric_card(label: str, value: str, helper: str = "", tone: str = "neutral") -> None:
-    helper_html = f'<span class="metric-helper">{escape(helper)}</span>' if helper else ""
-    st.markdown(
-        f"""
-        <div class="metric-card {escape(tone)}">
-            <span class="metric-label">{escape(label)}</span>
-            <span class="metric-value">{escape(value)}</span>
-            {helper_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
+def make_import_template() -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Constructions"
+    headers = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+               "Unit weight (kg)", "Glass weight (kg)", "Glass mode", "Rotated"]
+    ws.append(headers)
+
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    dv_type = DataValidation(type="list",
+        formula1='"Door,Window,Fixed Window,Sliding Door,Double Sliding Door,Triple Sliding Door,Quad Sliding Door,Double Folding Door,Triple Folding Door,Quad Folding Door,5-leaf Folding Door,Door + Sidelight,Window + Sidelight"',
+        showDropDown=False)
+    ws.add_data_validation(dv_type)
+    dv_type.sqref = "B2:B1000"
+
+    dv_glass = DataValidation(type="list",
+        formula1='"Glazed,Unglazed,Without glass"', showDropDown=False)
+    ws.add_data_validation(dv_glass)
+    dv_glass.sqref = "H2:H1000"
+
+    dv_rot = DataValidation(type="list", formula1='"NO,YES"', showDropDown=False)
+    ws.add_data_validation(dv_rot)
+    dv_rot.sqref = "I2:I1000"
+
+    for col, width in zip("ABCDEFGHI", [22, 20, 14, 14, 8, 18, 18, 16, 10]):
+        ws.column_dimensions[col].width = width
+
+    ws_f = wb.create_sheet("Facades")
+    facade_headers = ["Item", "Length (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"]
+    ws_f.append(facade_headers)
+    facade_fill = PatternFill("solid", fgColor="375623")
+    for cell in ws_f[1]:
+        cell.fill = facade_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    for col, width in zip("ABCDE", [22, 14, 8, 18, 18]):
+        ws_f.column_dimensions[col].width = width
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ============================================================
+# SESSION HELPERS
+# ============================================================
+def add_result_to_session(result: Dict[str, object]) -> None:
+    if "results" not in st.session_state:
+        st.session_state.results = []
+    st.session_state.results.append(result)
+
+
+def clear_results() -> None:
+    st.session_state.results = []
+
+
+# ============================================================
+# UI
+# ============================================================
+st.set_page_config(page_title="Packing Calculator", layout="wide")
+
+header_left, header_right = st.columns([1, 4])
+with header_left:
+    try:
+        st.image("nordan_logo1.png", use_container_width=True)
+    except Exception:
+        st.markdown("**NorDan**")
+
+with header_right:
+    st.title("Packing Calculator Pre-Alfa Version")
+    st.caption("Manual packing calculation for constructions")
+
+# with st.expander("Rules used", expanded=False):
+#     st.markdown(...)  # rules hidden — uncomment to restore
+
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "project_name" not in st.session_state:
+    st.session_state.project_name = "packing_calculation"
+if "edit_idx" not in st.session_state:
+    st.session_state.edit_idx = None
+
+TYPES = [
+    "Door",
+    "Window",
+    "Fixed Window",
+    "Sliding Door",
+    "Double Sliding Door",
+    "Triple Sliding Door",
+    "Quad Sliding Door",
+    "Double Folding Door",
+    "Triple Folding Door",
+    "Quad Folding Door",
+    "5-leaf Folding Door",
+    "Door + Sidelight",
+    "Window + Sidelight",
+    "Facade",
+]
+
+if "selected_type" not in st.session_state:
+    st.session_state.selected_type = TYPES[0]
+
+left, right = st.columns([1, 1])
+
+with left:
+    # Prefill values from edit state if editing
+    _e = st.session_state.edit_idx
+    if _e is not None:
+        _r = st.session_state.results[_e]
+        _def_name     = _r.get("Item", "...")
+        _def_type     = _r.get("Type", TYPES[0])
+        _def_width    = max(1.0, float(_r.get("Width (mm)", 1000.0) or 1000.0))
+        _def_height   = max(1.0, float(_r.get("Height (mm)", 1000.0) or 1000.0))
+        _def_qty      = max(1, int(_r.get("Qty", 1) or 1))
+        _def_weight   = float(_r.get("Unit weight (kg)", 0.0) or 0.0)
+        _def_mode     = _r.get("Glass mode", "Glazed")
+        _def_glass_w  = float(_r.get("Glass weight (kg)", 0.0) or 0.0)
+        _def_rotated  = str(_r.get("Rotated", "NO")).strip().upper() == "YES"
+        _title = f"✏️ Edit construction: {_def_name}"
+    else:
+        _def_name, _def_type, _def_width, _def_height = "...", TYPES[0], 1000.0, 1000.0
+        _def_qty, _def_weight, _def_mode, _def_glass_w, _def_rotated = 1, 0.0, "Glazed", 0.0, False
+        _title = "Add construction"
+
+    # Detect if facade is selected (for field visibility)
+    _current_type = st.session_state.get("selected_type", _def_type)
+
+    st.subheader(_title)
+
+    # Type selector outside form so facade detection works immediately
+    selected_type_ui = st.selectbox(
+        "Type",
+        TYPES,
+        index=TYPES.index(_current_type) if _current_type in TYPES else 0,
+        key="selected_type",
     )
 
+    with st.form(f"packing_form_{_e if _e is not None else 'new'}"):
+        item_name = st.text_input("Item name", value=_def_name)
+        item_type = selected_type_ui
+        is_facade_form = (selected_type_ui == "Facade")
 
-def _score_panel(score: float, risk_level: str) -> None:
-    tone = _risk_tone(risk_level)
-    safe_score = max(0.0, min(100.0, score))
-    st.markdown(
-        f"""
-        <div class="score-panel {tone}">
-            <div class="score-topline">
-                <strong>{escape(risk_level)}</strong>
-                <span>{safe_score:.1f}/100</span>
-            </div>
-            <div class="score-rail">
-                <div class="score-fill {tone}" style="width: {safe_score:.1f}%"></div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        if is_facade_form:
+            facade_length = st.number_input("Length (mm)", min_value=1.0, value=_def_width if _def_width > 1.0 else 1000.0, step=1.0)
+            width_mm  = facade_length
+            height_mm = 1.0
+        else:
+            width_mm  = st.number_input("Width (mm)",  min_value=1.0, value=_def_width,  step=1.0)
+            height_mm = st.number_input("Height (mm)", min_value=1.0, value=_def_height, step=1.0)
+        qty       = st.number_input("Quantity",    min_value=1,    value=_def_qty,    step=1)
+        weight_kg = st.number_input("Unit weight (kg)", min_value=0.0, value=_def_weight, step=0.01)
+
+        glass_mode = st.selectbox("Glass", ["Glazed", "Unglazed", "Without glass"],
+            index=["Glazed", "Unglazed", "Without glass"].index(_def_mode) if _def_mode in ["Glazed", "Unglazed", "Without glass"] else 0,
+            help="Glazed = glass travels with frame | Unglazed = glass goes separately (glass box) | Without glass = no glass at all",
+        )
+
+        glass_weight_kg = st.number_input(
+            "Glass weight (kg)",
+            min_value=0.0, value=_def_glass_w, step=0.01,
+            help="Weight of glass only — required when glass is packed separately",
+        )
+
+        rotated = st.checkbox(
+            "Rotated (swap width ↔ height)",
+            value=_def_rotated,
+            help="Use when construction is packed rotated — width and height are swapped for packing calculations. Allows glazed packing if rotated height ≤ 2700mm.",
+        )
+
+        _btn_label = "Save changes" if _e is not None else "Calculate and add"
+        submitted = st.form_submit_button(_btn_label)
+
+        if submitted:
+            if weight_kg <= 0:
+                st.warning("⚠️ Unit weight is 0 — please enter the actual weight before adding.")
+            elif glass_mode in ("Glazed", "Unglazed") and glass_weight_kg <= 0:
+                st.warning("⚠️ Glass weight is 0 — please enter the glass weight before adding.")
+            else:
+                construction = Construction(
+                    item_name=item_name.strip() or "Unnamed",
+                    item_type=item_type,
+                    width_mm=float(width_mm),
+                    height_mm=float(height_mm),
+                    qty=int(qty),
+                    weight_kg=float(weight_kg),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+                    rotated=rotated,
+                )
+                result = calculate_construction(construction)
+                if _e is not None:
+                    st.session_state.results[_e] = result
+                    st.session_state.edit_idx = None
+                    st.success(f"Updated: {result['Item']}")
+                else:
+                    add_result_to_session(result)
+                    st.success(f"Added: {result['Item']}")
+                st.rerun()
+
+with right:
+    # ---- Order statistics ----
+    if st.session_state.results:
+        st.subheader("Order statistics")
+        stats_df = pd.DataFrame(st.session_state.results)
+
+        total_units = int(pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0).sum())
+        total_weight = float(
+            (pd.to_numeric(stats_df["Unit weight (kg)"], errors="coerce").fillna(0)
+             * pd.to_numeric(stats_df["Qty"], errors="coerce").fillna(0)).sum()
+        )
+        glazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "GLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        unglazed_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed as"] == "UNGLAZED", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        glass_separate_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Glass separate"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        sideways_units = int(
+            pd.to_numeric(stats_df.loc[stats_df["Packed sideways"] == "YES", "Qty"], errors="coerce").fillna(0).sum()
+        )
+        _psdf, _, _, _ = build_pallet_outputs(stats_df)
+        est_pallets = int(len(_psdf))
+
+        s1, s2 = st.columns(2)
+        s1.metric("Total units", total_units)
+        s2.metric("Total weight", f"{total_weight:,.0f} kg")
+
+        s3, s4 = st.columns(2)
+        s3.metric("Glazed units", glazed_units)
+        s4.metric("Unglazed units", unglazed_units)
+
+        s5, s6 = st.columns(2)
+        s5.metric("Glass separate", glass_separate_units)
+        s6.metric("Packed sideways", sideways_units)
+
+        st.metric("Estimated pallets", est_pallets)
+
+        if sideways_units > 0:
+            st.warning(f"⚠️ {sideways_units} unit(s) will be packed sideways (height > 2700 mm)")
+        if glass_separate_units > 0:
+            st.info(f"ℹ️ {glass_separate_units} unit(s) require separate glass boxes")
+
+        st.divider()
+
+    # ---- Preview ----
+    st.subheader("Preview")
+
+    preview = Construction(
+        item_name=item_name.strip() or "Unnamed",
+        item_type=item_type,
+        width_mm=float(width_mm),
+        height_mm=float(height_mm),
+        qty=int(qty),
+        weight_kg=float(weight_kg),
+        glass_mode=glass_mode,
+        glass_weight_kg=float(glass_weight_kg) if glass_mode != "Without glass" else 0.0,
+        rotated=rotated,
     )
 
+    preview_df = pd.DataFrame([calculate_construction(preview)])
+    st.dataframe(preview_df, use_container_width=True)
 
-def _callout(title: str, items: list[str], tone: str) -> None:
-    list_items = "".join(f"<li>{escape(item)}</li>" for item in items)
-    st.markdown(
-        f"""
-        <div class="callout {escape(tone)}">
-            <h3>{escape(title)}</h3>
-            <ul>{list_items}</ul>
-        </div>
-        """,
-        unsafe_allow_html=True,
+st.divider()
+st.subheader("Constructions")
+
+if st.session_state.results:
+    results_df = pd.DataFrame(st.session_state.results)
+    st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("### Edit / Remove item")
+    col_sel, col_edit, col_del = st.columns([6, 1, 1])
+
+    with col_sel:
+        item_to_manage = st.selectbox(
+            "Select item",
+            options=list(range(len(results_df))),
+            format_func=lambda x: f"{results_df.iloc[x]['Item']} (row {x})",
+            label_visibility="collapsed",
+        )
+
+    with col_edit:
+        if st.button("✏️ Edit", use_container_width=True):
+            st.session_state.edit_idx = item_to_manage
+            st.rerun()
+
+    with col_del:
+        if st.button("🗑️ Delete", use_container_width=True):
+            if st.session_state.edit_idx == item_to_manage:
+                st.session_state.edit_idx = None
+            st.session_state.results.pop(item_to_manage)
+            st.rerun()
+
+    pallet_summary_df, plan_df, total_pallet_cost, total_pallet_ldm = build_pallet_outputs(results_df)
+    glass_boxes, total_glass_weight, glass_cost, glass_ldm, glass_pallet_width = calculate_glass_boxes(results_df)
+    total_packaging_cost = total_pallet_cost + glass_cost
+    total_ldm = total_pallet_ldm + glass_ldm
+
+    # Add glass boxes to pallet summary
+    pallet_summary_with_glass_df = add_glass_to_pallet_summary(
+        pallet_summary_df, glass_boxes, glass_cost, glass_ldm, total_glass_weight, glass_pallet_width
     )
 
+    kpi_df = pd.DataFrame(
+        [
+            {
+                "Product pallets count": int(len(pallet_summary_df)),
+                "Pallet cost (EUR)": round(total_pallet_cost, 2),
+                "Glass boxes count": int(glass_boxes),
+                "Glass weight total (kg)": round(total_glass_weight, 2),
+                "Glass cost (EUR)": round(glass_cost, 2),
+                "Total packaging cost (EUR)": round(total_packaging_cost, 2),
+                "Product LDM": round(total_pallet_ldm, 3),
+                "Glass LDM": round(glass_ldm, 3),
+                "Total LDM": round(total_ldm, 3),
+                "Trailer type": trailer_type,
+                "Ireland freight (EUR)": round(ireland_cost, 2),
+                "Total cost (EUR)": round(total_packaging_cost + ireland_cost, 2),
+            }
+        ]
+    )
 
-def _risk_tone(risk_level: str) -> str:
-    normalized = risk_level.casefold()
-    if normalized.startswith("low"):
-        return "good"
-    if normalized.startswith("medium"):
-        return "watch"
-    return "critical"
+    st.subheader("Summary")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Product pallets", int(len(pallet_summary_df)))
+    c2.metric("Glass boxes", int(glass_boxes))
+    c3.metric("Packaging cost", f"{total_packaging_cost:.2f} EUR")
+    c4.metric("Total LDM", f"{total_ldm:.3f}")
 
+    # ---- Ireland freight ----
+    is_mega = any(
+        str(r.get("Packed sideways", "NO")).upper() == "YES"
+        for r in st.session_state.results
+    )
+    ireland_cost = get_ireland_freight(total_ldm, is_mega)
+    trailer_type = "Mega" if is_mega else "Standard"
 
-def _wind_load_to_exposure(wind_load: str) -> str:
-    return "Low" if wind_load.startswith("<") else "High"
+    st.subheader("🚛 Ireland freight estimate")
+    fr1, fr2, fr3 = st.columns(3)
+    fr1.metric("Trailer type", trailer_type)
+    fr2.metric("Freight cost", f"{ireland_cost:,.1f} EUR")
+    fr3.metric("Total (packaging + freight)", f"{total_packaging_cost + ireland_cost:,.1f} EUR")
 
+    st.dataframe(kpi_df, use_container_width=True)
 
-def _project_name_from_packages(package_rows: list[dict]) -> str:
-    element_types = list(dict.fromkeys(row["element_type"] for row in package_rows))
-    if len(element_types) == 1:
-        return f"Project {element_types[0].lower()} tender"
-    if len(element_types) == 2:
-        return f"Project {element_types[0].lower()} + {element_types[1].lower()} tender"
-    return "Project mixed element tender"
+    if not pallet_summary_with_glass_df.empty:
+        st.subheader("Pallet summary")
+        st.dataframe(pallet_summary_with_glass_df, use_container_width=True)
 
+    if not plan_df.empty:
+        st.subheader("Packing plan")
+        st.dataframe(plan_df, use_container_width=True)
 
-def _project_type_from_packages(package_rows: list[dict]) -> str:
-    project_types = list(dict.fromkeys(_element_to_project_type(row["element_type"]) for row in package_rows))
-    if len(project_types) == 1:
-        return project_types[0]
-    return "Mixed package"
+    excel_data = make_excel_file(results_df, pallet_summary_with_glass_df, plan_df, kpi_df)
 
+    dl_col, clear_col = st.columns([3, 1])
+    with dl_col:
+        name_c1, name_c2 = st.columns([4, 1])
+        with name_c1:
+            new_name = st.text_input(
+                "Project name",
+                value=st.session_state.project_name,
+                key="project_name_input",
+                label_visibility="collapsed",
+                placeholder="Enter project name",
+            )
+        with name_c2:
+            if st.button("💾 Save name", use_container_width=True):
+                st.session_state.project_name = new_name.strip() or "packing_calculation"
 
-def _material_type_from_packages(package_rows: list[dict]) -> str:
-    material_types = {_element_to_material_type(row["element_type"]) for row in package_rows}
-    if "Glass-heavy facade" in material_types:
-        return "Glass-heavy facade"
-    if "Steel elements" in material_types:
-        return "Steel elements"
-    return "Standard aluminum profiles"
+        st.download_button(
+            label="⬇️ Download Excel report",
+            data=excel_data,
+            file_name=f"{st.session_state.project_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with clear_col:
+        st.write("")
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Clear all", use_container_width=True):
+            clear_results()
+            st.session_state.edit_idx = None
+            st.rerun()
 
+else:
+    st.info("No constructions added yet.")
 
-def _design_repetition_from_packages(package_rows: list[dict]) -> str:
-    unique_types = {row["element_type"] for row in package_rows}
-    if len(unique_types) == 1:
-        return "Repeated"
-    return "Partially similar"
+st.divider()
+st.subheader("📂 Import from Excel")
+st.caption("Fill in the template and upload it to calculate packing automatically")
 
+st.download_button(
+    label="⬇️ Download input template",
+    data=make_import_template(),
+    file_name="import_template.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
-def _element_to_project_type(element_type: str) -> str:
-    if "window" in element_type.lower():
-        return "Windows"
-    if "door" in element_type.lower():
-        return "Doors"
-    return "Facade"
+uploaded = st.file_uploader("Upload filled template (.xlsx)", type=["xlsx"])
 
+if uploaded is not None:
+    try:
+        xl_sheets = pd.read_excel(uploaded, sheet_name=None)
 
-def _element_to_material_type(element_type: str) -> str:
-    if "window" in element_type.lower():
-        return "Standard aluminum profiles"
-    if "door" in element_type.lower():
-        return "Steel elements"
-    return "Glass-heavy facade"
+        def parse_num(val) -> float:
+            try:
+                s = str(val).strip()
+                if s in ("", "nan", "None"):
+                    return 0.0
+                s = s.replace("\xa0", "").replace(" ", "")
+                s = s.replace(",", ".")
+                return float(s)
+            except Exception:
+                return 0.0
 
+        # ---- Detect NorDan Calculation file (Sheet1 with horizontal layout) ----
+        is_nordan_calc = "Sheet1" in xl_sheets and "Constructions" not in xl_sheets
 
-def _coating_to_region(coating_type: str) -> str:
-    if "Seaside" in coating_type:
-        return "Coastal"
-    return "Urban"
+        # ---- Detect Packing file (horizontal layout: rows=params, cols=constructions) ----
+        first_sheet = list(xl_sheets.values())[0]
+        first_col = first_sheet.iloc[:, 0].astype(str).str.strip().tolist() if not first_sheet.empty else []
+        is_packing_format = "Item number" in first_col and "Total width" in first_col
 
+        if is_packing_format:
+            df_raw = list(xl_sheets.values())[0]
+            df_raw = df_raw.set_index(df_raw.columns[0])
 
-def _technical_complexity_from_selection(wind_exposure: str, coating_type: str) -> str:
-    if wind_exposure == "High" or "Seaside" in coating_type:
-        return "Medium"
-    return "Low"
+            rows = []
+            for col in df_raw.columns:
+                val = lambda r: df_raw.loc[r, col] if r in df_raw.index else None
+                item_name = str(col).strip()
+                if not item_name or item_name in (" ", "nan"):
+                    continue
 
+                raw_type = str(val("Type") or "").strip()
+                item_type = raw_type if raw_type in TYPES else "Door"
 
-def _glass_supply_to_installation_model(glass_supply_model: str) -> str:
-    if glass_supply_model.startswith("External supplier"):
-        return "Client installation"
-    return "Company installation"
+                raw_mode = str(val("Glass mode") or "").strip()
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                else:
+                    glass_w_check = parse_num(val("Glass"))
+                    glass_mode = "Glazed" if glass_w_check > 0 else "Without glass"
 
+                rotated = str(val("Rotated") or "NO").strip().upper() == "YES"
 
-def _format_glass_supply_model(glass_supply_model: str) -> str:
-    if glass_supply_model.startswith("External supplier"):
-        return "Customer supplies glass units (43% material margin only)"
-    return "Company supplies glass units (34% full project margin)"
+                c = Construction(
+                    item_name=item_name,
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(val("Total width"))),
+                    height_mm=max(1.0, parse_num(val("Total height"))),
+                    qty=max(1, int(parse_num(val("Number") or 1))),
+                    weight_kg=parse_num(val("Profiles")),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(val("Glass")),
+                    rotated=rotated,
+                )
+                rows.append(calculate_construction(c))
 
+            st.success(f"✅ Found {len(rows)} construction(s) — ready to import")
+            preview_cols = ["Item", "Type", "Width (mm)", "Height (mm)", "Qty",
+                           "Unit weight (kg)", "Glass weight (kg)", "Glass mode"]
+            st.dataframe(pd.DataFrame(rows)[preview_cols], use_container_width=True)
 
-def _format_production_duration(hours: float, weeks: float) -> str:
-    if hours and weeks < 1:
-        return f"{hours:g} hours"
-    return f"{weeks:g} weeks"
+            imp_col1, imp_col2 = st.columns(2)
+            with imp_col1:
+                if st.button("⬆️ Import and replace all", use_container_width=True):
+                    st.session_state.results = rows
+                    st.session_state.edit_idx = None
+                    st.success(f"Imported {len(rows)} construction(s)!")
+                    st.rerun()
+            with imp_col2:
+                if st.button("➕ Import and add to existing", use_container_width=True):
+                    if "results" not in st.session_state:
+                        st.session_state.results = []
+                    st.session_state.results.extend(rows)
+                    st.success(f"Added {len(rows)} construction(s)!")
+                    st.rerun()
 
+        elif is_nordan_calc:
+            df_raw = pd.read_excel(uploaded, sheet_name="Sheet1", header=None)
+            # Find vertical table header row (has "Item number", "Production line", etc.)
+            header_row = None
+            for i, row in df_raw.iterrows():
+                vals = [str(v).strip() for v in row.values]
+                if "Item number" in vals and "Production line" in vals and "Total width" in vals:
+                    header_row = i
+                    break
 
-def _format_hours(hours: float) -> str:
-    return f"{hours:g} hours"
+            if header_row is None:
+                st.error("❌ Could not find data table in Sheet1")
+            else:
+                df = pd.read_excel(uploaded, sheet_name="Sheet1", header=header_row)
+                df = df.dropna(subset=["Item number"])
+                df = df[df["Item number"].astype(str).str.strip().str.match(r'^\d+\.')]
 
+                def build_nordan_row(row):
+                    prod_line = str(row.get("Production line", "")).lower()
+                    if "unglazed" in prod_line:
+                        glass_mode = "Unglazed"
+                    elif "glazed" in prod_line:
+                        glass_mode = "Glazed"
+                    else:
+                        glass_mode = "Without glass"
 
-def _gbp(value: float) -> str:
-    return f"GBP {value:,.2f}"
+                    glass_w = parse_num(row.get("Glass", row.get("Glass weight (kg)", 0)))
+                    unit_w  = parse_num(row.get("Weight per item", row.get("Unit weight (kg)", 0)))
+                    width   = parse_num(row.get("Total width", row.get("Width (mm)", 1000)))
+                    height  = parse_num(row.get("Total height", row.get("Height (mm)", 1000)))
 
+                    c = Construction(
+                        item_name=str(row.get("Item number", "Unnamed")).strip(),
+                        item_type="Door",  # default — edit after import
+                        width_mm=max(1.0, width),
+                        height_mm=max(1.0, height),
+                        qty=max(1, int(parse_num(row.get("Number", row.get("Qty", 1))))),
+                        weight_kg=unit_w,
+                        glass_mode=glass_mode,
+                        glass_weight_kg=glass_w,
+                        rotated=False,
+                    )
+                    return calculate_construction(c)
 
-def _score_weight(name: str) -> float:
-    return {
-        "financial": 0.30,
-        "technical": 0.25,
-        "schedule": 0.25,
-        "environment": 0.10,
-        "similarity": 0.10,
-    }[name]
+                st.success(f"✅ Found {len(df)} construction(s) from NorDan Calculation file")
+                st.caption("⚠️ Type set to 'Door' by default — please review via ✏️ Edit after import")
+                st.dataframe(df[["Item number", "Production line", "Total width", "Total height",
+                                 "Number", "Weight per item", "Glass"]].reset_index(drop=True),
+                             use_container_width=True)
 
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        st.session_state.results = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(st.session_state.results)} construction(s)!")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        new_rows = [build_nordan_row(row) for _, row in df.iterrows()]
+                        st.session_state.results.extend(new_rows)
+                        st.success(f"Added {len(new_rows)} construction(s)!")
+                        st.rerun()
 
-if __name__ == "__main__":
-    main()
+        else:
+            # ---- Standard template format ----
+            xl = xl_sheets.get("Constructions", pd.DataFrame())
+            template_cols = {"Item", "Type", "Width (mm)", "Height (mm)", "Qty", "Unit weight (kg)", "Glass weight (kg)"}
+            is_template = template_cols.issubset(set(xl.columns))
+
+            def build_row(row):
+                raw_mode = str(row.get("Glass mode", "")).strip()
+                # Map NorDan production line strings to glass mode
+                raw_lower = raw_mode.lower()
+                if "unglazed" in raw_lower:
+                    glass_mode = "Unglazed"
+                elif "glazed" in raw_lower:
+                    glass_mode = "Glazed"
+                elif raw_mode in ("Glazed", "Unglazed", "Without glass"):
+                    glass_mode = raw_mode
+                else:
+                    glass_mode = "Glazed" if parse_num(row.get("Glass weight (kg)", 0)) > 0 else "Without glass"
+                rotated = str(row.get("Rotated", "NO")).strip().upper() == "YES"
+                item_type = str(row.get("Type", "")).strip()
+                if item_type not in ["Door", "Window", "Fixed Window", "Sliding Door",
+                                     "Folding Door", "Door + Sidelight", "Window + Sidelight"]:
+                    item_type = "Door"
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type=item_type,
+                    width_mm=max(1.0, parse_num(row.get("Width (mm)", 1000))),
+                    height_mm=max(1.0, parse_num(row.get("Height (mm)", 1000))),
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode=glass_mode,
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=rotated,
+                )
+                return calculate_construction(c)
+
+            def build_facade_row(row):
+                c = Construction(
+                    item_name=str(row.get("Item", "Unnamed")).strip(),
+                    item_type="Facade",
+                    width_mm=max(1.0, parse_num(row.get("Length (mm)", 1000))),
+                    height_mm=1.0,
+                    qty=max(1, int(parse_num(row.get("Qty", 1)))),
+                    weight_kg=parse_num(row.get("Unit weight (kg)", 0)),
+                    glass_mode="Glazed",
+                    glass_weight_kg=parse_num(row.get("Glass weight (kg)", 0)),
+                    rotated=False,
+                )
+                return calculate_construction(c)
+
+            if is_template:
+                valid_const = xl[~xl["Item"].astype(str).str.strip().isin(["", "nan"])]
+                missing_type = valid_const[~valid_const["Type"].astype(str).str.strip().isin(
+                    ["Door","Window","Fixed Window","Sliding Door","Folding Door",
+                     "Door + Sidelight","Window + Sidelight"])]
+
+                xl_facade = xl_sheets.get("Facades", pd.DataFrame())
+                has_facades = not xl_facade.empty and "Item" in xl_facade.columns
+                valid_facades = xl_facade[~xl_facade["Item"].astype(str).str.strip().isin(
+                    ["", "nan"])] if has_facades else pd.DataFrame()
+
+                st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
+
+                col_prev1, col_prev2 = st.columns(2)
+                with col_prev1:
+                    st.caption("Constructions")
+                    st.dataframe(valid_const[["Item","Type","Width (mm)","Height (mm)","Qty","Glass mode"]],
+                                 use_container_width=True)
+                with col_prev2:
+                    if not valid_facades.empty:
+                        st.caption("Facades")
+                        st.dataframe(valid_facades, use_container_width=True)
+
+                imp_col1, imp_col2 = st.columns(2)
+                with imp_col1:
+                    if st.button("⬆️ Import and replace all", use_container_width=True):
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results = rows
+                        st.session_state.edit_idx = None
+                        st.success(f"Imported {len(rows)} item(s)!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+                with imp_col2:
+                    if st.button("➕ Import and add to existing", use_container_width=True):
+                        if "results" not in st.session_state:
+                            st.session_state.results = []
+                        rows = [build_row(row) for _, row in valid_const.iterrows()]
+                        rows += [build_facade_row(row) for _, row in valid_facades.iterrows()]
+                        st.session_state.results.extend(rows)
+                        st.success(f"Added {len(rows)} item(s) to existing list!")
+                        if len(missing_type) > 0:
+                            st.warning(f"⚠️ {len(missing_type)} row(s) had no Type — set to 'Door'. Review via ✏️ Edit.")
+                        st.rerun()
+            else:
+                st.error("❌ Unrecognised file format. Please use the NorDan Calculation file or the template.")
+
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
