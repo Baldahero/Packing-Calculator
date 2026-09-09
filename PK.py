@@ -65,16 +65,36 @@ IRELAND_FTL = (5170, 5500)  # (Standard, Mega)
 
 
 def get_ireland_freight(total_ldm: float, is_mega: bool) -> float:
-    """Get Ireland freight cost based on LDM and trailer type."""
+    """Get Ireland freight cost based on LDM and trailer type.
+    Splits into multiple trucks if total LDM exceeds max truck capacity (13.6 LDM).
+    """
+    MAX_TRUCK_LDM = 13.6
     ldm_keys = sorted(IRELAND_RATES.keys())
-    # Round up to nearest LDM tier
-    for key in ldm_keys:
-        if total_ldm <= key:
-            std, mega = IRELAND_RATES[key]
-            return mega if is_mega else std
-    # FTL
-    std, mega = IRELAND_FTL
-    return mega if is_mega else std
+
+    if total_ldm <= 0:
+        return 0.0
+
+    # Split into trucks
+    full_trucks = int(total_ldm // MAX_TRUCK_LDM)
+    remaining_ldm = total_ldm % MAX_TRUCK_LDM
+
+    # FTL cost per truck
+    ftl_std, ftl_mega = IRELAND_FTL
+    ftl_cost = ftl_mega if is_mega else ftl_std
+
+    total_cost = full_trucks * ftl_cost
+
+    # Remaining LDM
+    if remaining_ldm > 0:
+        for key in ldm_keys:
+            if remaining_ldm <= key:
+                std, mega = IRELAND_RATES[key]
+                total_cost += mega if is_mega else std
+                break
+        else:
+            total_cost += ftl_cost
+
+    return total_cost
 
 # Types with special glazing rule: glazed only if height <= 2700 and weight <= 1000 kg
 # Also limited to MAX_ITEMS_PER_PALLET_HEAVY per pallet
@@ -493,17 +513,19 @@ def add_glass_to_pallet_summary(pallet_summary_df: pd.DataFrame, glass_boxes: in
 # ============================================================
 def calculate_glass_boxes(results_df: pd.DataFrame):
     if results_df.empty:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
     separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
     if separate_glass_df.empty:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
-    glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
-    glass_parts = pd.Series([1.0] * len(separate_glass_df), index=separate_glass_df.index)
-
+    # Use glass weight (no fallback to unit weight)
     if "Glass parts" in separate_glass_df.columns:
         glass_parts = pd.to_numeric(separate_glass_df["Glass parts"], errors="coerce").fillna(1.0)
+    else:
+        glass_parts = pd.Series([1.0] * len(separate_glass_df), index=separate_glass_df.index)
+
+    glass_w = pd.to_numeric(separate_glass_df.get("Glass weight (kg)", 0), errors="coerce").fillna(0.0)
 
     total_glass_weight = float(
         (
@@ -514,7 +536,7 @@ def calculate_glass_boxes(results_df: pd.DataFrame):
     )
 
     if total_glass_weight <= 0:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, float(GLASS_PALLET_WIDTH_MM)
 
     glass_boxes = int(math.ceil(total_glass_weight / GLASS_BOX_MAX_WEIGHT_KG))
     glass_cost = glass_boxes * GLASS_BOX_PRICE_EUR
@@ -898,11 +920,14 @@ if st.session_state.results:
     c3.metric("Packaging cost", f"{total_packaging_cost:.2f} EUR")
     c4.metric("Total LDM", f"{total_ldm:.3f}")
 
+    truck_count = max(1, math.ceil(total_ldm / 13.6))
+
     st.subheader("🚛 Ireland freight estimate")
-    fr1, fr2, fr3 = st.columns(3)
+    fr1, fr2, fr3, fr4 = st.columns(4)
     fr1.metric("Trailer type", trailer_type)
-    fr2.metric("Freight cost", f"{ireland_cost:,.1f} EUR")
-    fr3.metric("Total (packaging + freight)", f"{total_packaging_cost + ireland_cost:,.1f} EUR")
+    fr2.metric("Trucks needed", truck_count)
+    fr3.metric("Freight cost", f"{ireland_cost:,.1f} EUR")
+    fr4.metric("Total (packaging + freight)", f"{total_packaging_cost + ireland_cost:,.1f} EUR")
 
     st.dataframe(kpi_df, use_container_width=True)
 
