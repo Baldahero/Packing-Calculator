@@ -282,7 +282,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
         elif is_facade:
             packed_as = "UNGLAZED"
             glass_separate = "YES"
-            notes = "Facade — glass always packed separately"
+            if facade_parts > 1:
+                real_width = real_pallet_width(calc_width / facade_parts, calc_height)
+                notes = f"Facade split into {facade_parts} parts (length > {MAX_CONSTRUCTION_HEIGHT} mm); pallet width = {int(real_width)} mm"
+            else:
+                notes = "Facade — glass always packed separately"
         elif construction.item_type.lower() == "sliding door" and calc_width > MAX_SLIDING_WIDTH:
             packed_as = "SPLIT"
             glass_separate = "YES"
@@ -322,12 +326,19 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     if construction.rotated and "rotated" not in notes.lower():
         notes += "; packed rotated (width↔height swapped)"
 
-    # For multi-part sliding doors: glass weight is total (not split), pallet width is per part
-    glass_parts = parts if parts > 1 else 1
+    # For multi-part sliding/folding doors: glass weight is total, pallet width is per part
+    # For facades > max length: split into parts
+    effective_parts = facade_parts if is_facade else (parts if parts > 1 else 1)
+    glass_parts = effective_parts if effective_parts > 1 else 1
     glass_weight_per_part = round(stored_glass_weight / glass_parts, 3) if glass_parts > 1 else stored_glass_weight
 
-    # Glass pallet width = width per part for multi-part sliding/folding doors
-    glass_pallet_width = round(real_pallet_width(calc_width / parts, calc_height)) if parts > 1 else int(real_width)
+    # Glass pallet width = width per part
+    if is_facade and facade_parts > 1:
+        glass_pallet_width = round(real_pallet_width(calc_width / facade_parts, calc_height))
+    elif parts > 1:
+        glass_pallet_width = round(real_pallet_width(calc_width / parts, calc_height))
+    else:
+        glass_pallet_width = int(real_width)
 
     return {
         "Item": construction.item_name,
