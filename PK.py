@@ -222,6 +222,11 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     is_facade = construction.item_type.lower() in FACADE_TYPES
     parts = SLIDING_PARTS.get(construction.item_type.lower(), 1)
 
+    # For facades longer than max pallet size: split into 2 parts
+    facade_parts = 1
+    if is_facade and calc_width > MAX_CONSTRUCTION_HEIGHT:
+        facade_parts = math.ceil(calc_width / MAX_CONSTRUCTION_HEIGHT)
+
     # For multi-part sliding doors, pallet width is full width (not per part)
     # Only glass weight is split by number of parts
 
