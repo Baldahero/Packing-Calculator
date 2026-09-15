@@ -828,7 +828,7 @@ with right:
 
         st.divider()
 
-    # ---- Preview ----
+     ---- Preview ----
     st.subheader("Preview")
 
     preview = Construction(
