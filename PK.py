@@ -851,7 +851,43 @@ st.subheader("Constructions")
 
 if st.session_state.results:
     results_df = pd.DataFrame(st.session_state.results)
-    st.dataframe(results_df, use_container_width=True)
+
+    # Show Constructions and Glass box breakdown side by side
+    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
+    if not separate_glass_df.empty:
+        tbl_left, tbl_right = st.columns([3, 2])
+        with tbl_left:
+            st.caption("Constructions")
+            st.dataframe(results_df, use_container_width=True)
+        with tbl_right:
+            st.caption("Glass box breakdown")
+            def parse_num_safe(val):
+                try:
+                    return float(str(val).replace(" ", "").replace(",", "."))
+                except Exception:
+                    return 0.0
+            glass_breakdown_rows = []
+            for _, row in separate_glass_df.iterrows():
+                gw = parse_num_safe(row.get("Glass weight (kg)", 0))
+                gp = int(parse_num_safe(row.get("Glass parts", 1)) or 1)
+                qty = int(parse_num_safe(row.get("Qty", 1)) or 1)
+                total_gw = gw * qty
+                boxes = math.ceil(total_gw / GLASS_BOX_MAX_WEIGHT_KG) if total_gw > 0 else 0
+                gpw = parse_num_safe(row.get("Glass pallet width (mm)", GLASS_PALLET_WIDTH_MM))
+                glass_breakdown_rows.append({
+                    "Item": row.get("Item", ""),
+                    "Type": row.get("Type", ""),
+                    "Qty": qty,
+                    "Glass weight (kg)": gw,
+                    "Glass parts": gp,
+                    "Total glass (kg)": round(total_gw, 2),
+                    "Glass boxes": boxes,
+                    "Glass pallet (mm)": int(gpw),
+                    "Glass cost (EUR)": round(boxes * GLASS_BOX_PRICE_EUR, 2),
+                })
+            st.dataframe(pd.DataFrame(glass_breakdown_rows), use_container_width=True)
+    else:
+        st.dataframe(results_df, use_container_width=True)
 
     st.markdown("### Edit / Remove item")
     col_sel, col_edit, col_del = st.columns([6, 1, 1])
@@ -935,43 +971,9 @@ if st.session_state.results:
         st.subheader("Pallet summary")
         st.dataframe(pallet_summary_with_glass_df, use_container_width=True)
 
-    # ---- Glass box breakdown per construction ----
-    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
-    if not separate_glass_df.empty:
-        st.subheader("Glass box breakdown")
-
-        def parse_num_safe(val):
-            try:
-                return float(str(val).replace(" ", "").replace(",", "."))
-            except Exception:
-                return 0.0
-
-        glass_breakdown_rows = []
-        for _, row in separate_glass_df.iterrows():
-            gw = parse_num_safe(row.get("Glass weight (kg)", 0))
-            gp = int(parse_num_safe(row.get("Glass parts", 1)) or 1)
-            qty = int(parse_num_safe(row.get("Qty", 1)) or 1)
-            total_gw = gw * qty
-            boxes = math.ceil(total_gw / GLASS_BOX_MAX_WEIGHT_KG) if total_gw > 0 else 0
-            gpw = parse_num_safe(row.get("Glass pallet width (mm)", GLASS_PALLET_WIDTH_MM))
-            glass_breakdown_rows.append({
-                "Item": row.get("Item", ""),
-                "Type": row.get("Type", ""),
-                "Qty": qty,
-                "Glass weight (kg)": gw,
-                "Glass parts": gp,
-                "Total glass weight (kg)": round(total_gw, 2),
-                "Glass boxes": boxes,
-                "Glass pallet width (mm)": int(gpw),
-                "Glass cost (EUR)": round(boxes * GLASS_BOX_PRICE_EUR, 2),
-            })
-
-        glass_breakdown_df = pd.DataFrame(glass_breakdown_rows)
-        st.dataframe(glass_breakdown_df, use_container_width=True)
-
-    if not plan_df.empty:
-        st.subheader("Packing plan")
-        st.dataframe(plan_df, use_container_width=True)
+    # if not plan_df.empty:
+    #     st.subheader("Packing plan")
+    #     st.dataframe(plan_df, use_container_width=True)
 
     excel_data = make_excel_file(results_df, pallet_summary_with_glass_df, plan_df, kpi_df)
 
