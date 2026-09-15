@@ -851,10 +851,10 @@ if st.session_state.results:
     results_df = pd.DataFrame(st.session_state.results)
     st.dataframe(results_df, use_container_width=True)
 
-    # Glass box below constructions
-    separate_glass_df = results_df[results_df["Glass eparate"] == "YES"].copy()
+    # Glass box breakdown below constructions
+    separate_glass_df = results_df[results_df["Glass separate"] == "YES"].copy()
     if not separate_glass_df.empty:
-        st.subheader("Glass box")
+        st.subheader("Glass box breakdown")
         def parse_num_safe(val):
             try:
                 return float(str(val).replace(" ", "").replace(",", "."))
