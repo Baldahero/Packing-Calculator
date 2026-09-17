@@ -963,9 +963,9 @@ if st.session_state.results:
         st.subheader("Pallet summary")
         st.dataframe(pallet_summary_with_glass_df, use_container_width=True)
 
-    # if not plan_df.empty:
-    #     st.subheader("Packing plan")
-    #     st.dataframe(plan_df, use_container_width=True)
+    if not plan_df.empty:
+        st.subheader("Packing plan")
+        st.dataframe(plan_df, use_container_width=True)
 
     excel_data = make_excel_file(results_df, pallet_summary_with_glass_df, plan_df, kpi_df)
 
@@ -1224,8 +1224,15 @@ if uploaded is not None:
 
                 xl_facade = xl_sheets.get("Facades", pd.DataFrame())
                 has_facades = not xl_facade.empty and "Item" in xl_facade.columns
-                valid_facades = xl_facade[~xl_facade["Item"].astype(str).str.strip().isin(
-                    ["", "nan"])] if has_facades else pd.DataFrame()
+                if has_facades:
+                    valid_facades = xl_facade[
+                        xl_facade["Item"].notna() &
+                        (xl_facade["Item"].astype(str).str.strip() != "") &
+                        (xl_facade["Item"].astype(str).str.strip().str.lower() != "nan") &
+                        (pd.to_numeric(xl_facade.get("Unit weight (kg)", pd.Series([0])), errors="coerce").fillna(0) > 0)
+                    ].copy()
+                else:
+                    valid_facades = pd.DataFrame()
 
                 st.success(f"✅ Found {len(valid_const)} construction(s) and {len(valid_facades)} facade(s) — ready to import")
 
