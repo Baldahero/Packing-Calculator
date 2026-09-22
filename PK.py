@@ -350,15 +350,57 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
 # ============================================================
 def expand_by_qty(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
+
     for _, row in df.iterrows():
         qty = int(row["Qty"])
-        for unit_idx in range(1, qty + 1):
-            rr = row.copy()
-            rr["Qty"] = 1
-            rr["Unit idx"] = unit_idx
-            rows.append(rr)
-    return pd.DataFrame(rows)
+        item_type = str(row.get("Type", "")).strip().lower()
 
+        for unit_idx in range(1, qty + 1):
+            total_weight = float(
+                row.get("Unit weight (kg)", 0) or 0
+            )
+
+            if item_type == "facade":
+                pallet_count = max(
+                    1,
+                    int(
+                        math.ceil(
+                            total_weight / MAX_PALLET_WEIGHT_KG
+                        )
+                    ),
+                )
+            else:
+                pallet_count = 1
+
+            for pallet_idx in range(1, pallet_count + 1):
+                rr = row.copy()
+                rr["Qty"] = 1
+
+                if item_type == "facade":
+                    remaining_weight = (
+                        total_weight
+                        - MAX_PALLET_WEIGHT_KG
+                        * (pallet_idx - 1)
+                    )
+
+                    rr["Unit weight (kg)"] = min(
+                        MAX_PALLET_WEIGHT_KG,
+                        remaining_weight,
+                    )
+
+                    # Не объединять части фасада на одной паллете
+                    rr["Max per pallet"] = 1
+
+                if pallet_count > 1:
+                    rr["Unit idx"] = (
+                        f"{unit_idx}.{pallet_idx}"
+                    )
+                else:
+                    rr["Unit idx"] = unit_idx
+
+                rows.append(rr)
+
+    return pd.DataFrame(rows)
 
 def pack_mixed(units: pd.DataFrame) -> List[Dict[str, object]]:
     if units.empty:
