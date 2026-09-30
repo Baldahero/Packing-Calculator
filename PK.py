@@ -307,9 +307,26 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     if mode != "Glazed" and packed_sideways and glass_separate == "NO":
         notes += "; construction packed sideways"
 
-    max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY if is_heavy_type else MAX_ITEMS_PER_PALLET
-    if packed_sideways:
-        max_per_pallet = 1
+   if is_facade:
+    # Facades are limited by pallet weight, not by unit count
+    max_per_pallet = 999999
+elif is_heavy_type:
+    max_per_pallet = MAX_ITEMS_PER_PALLET_HEAVY
+else:
+    max_per_pallet = MAX_ITEMS_PER_PALLET
+
+if packed_sideways and not is_facade:
+    max_per_pallet = 1
+
+    if item_type == "facade":
+    pallet_count = max(
+        1,
+        int(
+            math.ceil(
+                total_weight / MAX_PALLET_WEIGHT_KG
+            )
+        ),
+    )
 
     # Always store glass weight for visibility; it's used for pallet weight when glazed together
     stored_glass_weight = float(construction.glass_weight_kg) if construction.glass_mode != "Without glass" else 0.0
@@ -388,8 +405,8 @@ def expand_by_qty(df: pd.DataFrame) -> pd.DataFrame:
                         remaining_weight,
                     )
 
-                    # Не объединять части фасада на одной паллете
-                    rr["Max per pallet"] = 1
+                    # Facades can share a pallet while total weight stays within 1000 kg
+                    rr["Max per pallet"] = 999999
 
                 if pallet_count > 1:
                     rr["Unit idx"] = (
