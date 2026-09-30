@@ -307,7 +307,7 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
     if mode != "Glazed" and packed_sideways and glass_separate == "NO":
         notes += "; construction packed sideways"
 
-      if is_facade:
+         if is_facade:
         # Facades are limited by pallet weight, not by unit count
         max_per_pallet = 999999
     elif is_heavy_type:
