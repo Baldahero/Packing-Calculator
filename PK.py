@@ -304,10 +304,10 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
             packed_as = "GLAZED"
             notes = "Can be packed with glass"
 
-    if mode != "Glazed" and packed_sideways and glass_separate == "NO":
+        if mode != "Glazed" and packed_sideways and glass_separate == "NO":
         notes += "; construction packed sideways"
 
-         if is_facade:
+    if is_facade:
         # Facades are limited by pallet weight, not by unit count
         max_per_pallet = 999999
     elif is_heavy_type:
@@ -317,6 +317,8 @@ def calculate_construction(construction: Construction) -> Dict[str, object]:
 
     if packed_sideways and not is_facade:
         max_per_pallet = 1
+
+    # Always store glass weight for visibility; it's used for pallet weight when glazed together
 
     if item_type == "facade":
     pallet_count = max(
